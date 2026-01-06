@@ -5,9 +5,10 @@ from urllib.parse import urlparse
 from tqdm import tqdm  # Import tqdm for the progress bar
 
 # === Configuration ===
-INPUT_CSV = "/Users/user/Documents/AI/parallel-process/input/017F35E575D87A3FB5ED3D90A3E69355_20250904.csv"
-QUESTION_CSV = "/Users/user/Documents/AI/parallel-process/input/aug_sample_questions.csv"
-FILTER_CSV = "/Users/user/Documents/AI/parallel-process/input/school_list.csv"
+INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/sample_input.csv"
+QUESTION_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/questions.csv"
+FILTER_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/school_list.csv"
+USE_SCHOOL_FILTER = False  # Set to True to filter by school_list.csv, False to skip this filter
 OUTPUT_DIR = "output-pre-processor"
 
 # === SPLIT CONFIGURATION ===
@@ -29,12 +30,19 @@ total_input_rows = 0 # This will be set correctly below
 
 # === Step 1: Load FILTER_CSV school codes into a set ===
 valid_school_codes = set()
-with open(FILTER_CSV, newline='', encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        school_code = row.get("UDISE+ SCHOOL CODE", "").strip()
-        if school_code:
-            valid_school_codes.add(school_code)
+if USE_SCHOOL_FILTER and os.path.exists(FILTER_CSV):
+    with open(FILTER_CSV, newline='', encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            school_code = row.get("UDISE+ SCHOOL CODE", "").strip()
+            if school_code:
+                valid_school_codes.add(school_code)
+    print(f"✅ Loaded {len(valid_school_codes)} school codes from '{FILTER_CSV}'")
+elif USE_SCHOOL_FILTER and not os.path.exists(FILTER_CSV):
+    print(f"⚠️  USE_SCHOOL_FILTER is True but FILTER_CSV '{FILTER_CSV}' not found. Skipping school filter.")
+    USE_SCHOOL_FILTER = False
+else:
+    print(f"⏭️  School filtering disabled (USE_SCHOOL_FILTER={USE_SCHOOL_FILTER})")
 
 # === Helper function for cleaning cell values ===
 def clean_cell(value):
@@ -123,8 +131,8 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
     task = clean_cell(row.get("Tasks", "")) # Clean task for lookup
     evidence = row.get("Task Evidence", "") # Get raw evidence
 
-    # Rule 0: Skip if School ID not in FILTER_CSV
-    if school_id not in valid_school_codes:
+    # Rule 0: Skip if School ID not in FILTER_CSV (only if USE_SCHOOL_FILTER is enabled)
+    if USE_SCHOOL_FILTER and school_id not in valid_school_codes:
         skip_school_mismatch += 1
         continue
 
@@ -199,7 +207,10 @@ print(f"\n{'Filter Stage':<50} {'Removed':<10} {'Remaining'}")
 print(f"{'-'*70}")
 
 remaining_after_school = total_input_rows - skip_school_mismatch
-print(f"{'School ID not in filter list':<50} {skip_school_mismatch:<10} {remaining_after_school}")
+if USE_SCHOOL_FILTER:
+    print(f"{'School ID not in filter list':<50} {skip_school_mismatch:<10} {remaining_after_school}")
+else:
+    print(f"{'School ID filtering':<50} {'SKIPPED':<10} {remaining_after_school}")
 
 remaining_after_task = remaining_after_school - skip_task_start
 print(f"{'Task starts with 1 or 8':<50} {skip_task_start:<10} {remaining_after_task}")

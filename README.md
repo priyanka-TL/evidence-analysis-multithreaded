@@ -28,6 +28,12 @@ This repository contains a lightweight pipeline to preprocess CSV files, split t
   pip install -r requirements.txt
   ```
 
+  Create a virtual environment
+  python3 -m venv venv
+
+  Activate the virtual environment
+  source venv/bin/activate
+
 ## 🌍 Environment Setup
 If using the generative model in processor/1-main-parallel-script.py, create a .env file and include your GEMINI tokens:
 ```
