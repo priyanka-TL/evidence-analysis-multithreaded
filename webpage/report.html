@@ -304,21 +304,6 @@
             font-weight: 600;
         }
 
-        .pie-charts {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin: 20px 0;
-        }
-
-        .pie-chart-container {
-            background: white;
-            border-radius: 15px;
-            padding: 20px;
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
-            text-align: center;
-        }
-
         table {
             width: 100%;
             border-collapse: collapse;
@@ -682,12 +667,12 @@
                 </div>
 
                 <!-- Subject & Grade Pie Charts - State Specific -->
-                <div class="pie-charts" id="subjectGradePieCharts">
-                    <div class="pie-chart-container">
+                <div id="subjectGradePieCharts" style="display: none;">
+                    <div class="chart-container">
                         <div class="chart-title">Subject Distribution</div>
                         <canvas id="subjectPie"></canvas>
                     </div>
-                    <div class="pie-chart-container">
+                    <div class="chart-container">
                         <div class="chart-title">Grade Distribution</div>
                         <canvas id="gradePie"></canvas>
                     </div>
@@ -1302,7 +1287,7 @@
         );
 
         if (shouldShowSubjectGradeCharts) {
-            document.getElementById('subjectGradePieCharts').style.display = 'flex';
+            document.getElementById('subjectGradePieCharts').style.display = 'block';
             
             if(window.subjectPieChart) window.subjectPieChart.destroy();
             window.subjectPieChart = new Chart(document.getElementById('subjectPie'), { 
@@ -1318,8 +1303,18 @@
                 options: { 
                     animation: false, 
                     responsive: true, 
+                    maintainAspectRatio: true,
+                    aspectRatio: 2,
                     cutout: '60%', 
-                    plugins: { legend: { position: 'bottom' } } 
+                    plugins: { 
+                        legend: { 
+                            position: 'bottom',
+                            labels: { 
+                                font: { size: 12 },
+                                padding: 15
+                            }
+                        } 
+                    } 
                 } 
             });
 
@@ -1337,8 +1332,18 @@
                 options: { 
                     animation: false, 
                     responsive: true, 
+                    maintainAspectRatio: true,
+                    aspectRatio: 2,
                     cutout: '60%', 
-                    plugins: { legend: { position: 'bottom' } } 
+                    plugins: { 
+                        legend: { 
+                            position: 'bottom',
+                            labels: { 
+                                font: { size: 12 },
+                                padding: 15
+                            }
+                        } 
+                    } 
                 } 
             });
         } else {
