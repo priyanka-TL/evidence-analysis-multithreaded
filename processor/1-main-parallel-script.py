@@ -45,19 +45,19 @@ ENROLLMENT_TASK_FILTER = os.getenv(
 EXTRA_KEYS = {
     'Enrollment_2024': {
         'description': 'Enrollment count for 2024',
-        'extract_pattern': r'(?:last\s+year|previous\s+year|2024).*?(?:enrolment|enrollment|नामांकन).*?[:\(\s]+(\d{1,4})\)?|(?:enrolment|enrollment|नामांकन).*?(?:last\s+year|previous\s+year|2024).*?[:\(\s]+(\d{1,4})\)?',
+        'extract_pattern': r'(?:last\s+year|previous\s+year).*?(?:enrolment|enrollment|नामांकन).*?[:\s]+(\d{1,4})|(?:enrolment|enrollment|नामांकन).*?(?:last\s+year|previous\s+year).*?[:\s]+(\d{1,4})|2024.*?(?:enrolment|enrollment|नामांकन).*?[:\s]+(\d{1,4})|(?:enrolment|enrollment|नामांकन).*?2024.*?[:\s]+(\d{1,4})',
         'data_type': 'int',
         'task_filter': True  # Only extract from specific task
     },
     'Enrollment_2025': {
         'description': 'Enrollment count for 2025',
-        'extract_pattern': r'(?:current\s+year|this\s+year|2025).*?(?:enrolment|enrollment|नामांकन).*?[:\(\s]+(\d{1,4})\)?|(?:enrolment|enrollment|नामांकन).*?(?:current\s+year|this\s+year|2025).*?[:\(\s]+(\d{1,4})\)?',
+        'extract_pattern': r'(?:current\s+year|this\s+year).*?(?:enrolment|enrollment|नामांकन).*?[:\s]+(\d{1,4})|(?:enrolment|enrollment|नामांकन).*?(?:current\s+year|this\s+year).*?[:\s]+(\d{1,4})|2025.*?(?:enrolment|enrollment|नामांकन).*?[:\s]+(\d{1,4})|(?:enrolment|enrollment|नामांकन).*?2025.*?[:\s]+(\d{1,4})',
         'data_type': 'int',
         'task_filter': True  # Only extract from specific task
     },
     'Enrollment_Increase_Percentage': {
         'description': 'Percentage increase in enrollment',
-        'extract_pattern': r'(?:percentage\s+increase|increase|वृद्धि|प्रतिशत).*?(?:is\s+)?(\d+(?:\.\d+)?)\s*%|(\d+(?:\.\d+)?)\s*%\s*(?:increase|growth|rise|वृद्धि)',
+        'extract_pattern': r'(?:percentage\s+increase|increase|वृद्धि|प्रतिशत).*?(?:is\s+)?(-?\d+(?:\.\d+)?)\s*%|(-?\d+(?:\.\d+)?)\s*%\s*(?:increase|growth|rise|वृद्धि|decrease|decline)',
         'data_type': 'float',
         'task_filter': True  # Only extract from specific task
     }
@@ -234,61 +234,82 @@ def extract_extra_keys(text_fields, task_name=None):
 def calculate_relevance_tag(answers):
     """
     Calculate relevance tag based on answers.
-    Automatically detects and handles mixed answer types (YES/NO vs descriptive).
+    Handles YES/NO answers, descriptive answers, and mixed combinations.
     """
     if not answers or not isinstance(answers, list):
         return 'Irrelevant'
-    
+
     total_answers = len(answers)
+    if total_answers == 0:
+        return 'Irrelevant'
+
     yes_no_answers = []
     descriptive_answers = []
-    
+
     # Categorize answers
     for answer in answers:
+        if answer is None or str(answer).strip() == '':
+            continue
         answer_str = str(answer).strip().upper()
         if answer_str in ['YES', 'NO']:
             yes_no_answers.append(answer_str)
         else:
             # Consider it descriptive if it's not just YES/NO
             descriptive_answers.append(str(answer).strip())
-    
-    # Calculate relevance based on the dominant answer type
-    yes_no_ratio = len(yes_no_answers) / total_answers if total_answers > 0 else 0
-    descriptive_ratio = len(descriptive_answers) / total_answers if total_answers > 0 else 0
-    
-    if yes_no_ratio > descriptive_ratio:
-        # Mostly YES/NO answers - use binary calculation
+
+    # Calculate scores for each type
+    yes_no_score = 0
+    descriptive_score = 0
+
+    # Score YES/NO answers
+    if yes_no_answers:
         yes_count = sum(1 for answer in yes_no_answers if answer == 'YES')
-        total_binary = len(yes_no_answers)
-        percentage = (yes_count / total_binary) * 100 if total_binary > 0 else 0
-        if percentage >= 50:
-            return 'Relevant'
-        elif percentage > 0:
-            return 'Partially Relevant'
-        else:
-            return 'Irrelevant'
-    else:
-        # Mostly descriptive answers - use descriptive analysis
-        descriptive_score = 0
+        yes_no_score = (yes_count / len(yes_no_answers)) if yes_no_answers else 0
+
+    # Score descriptive answers
+    if descriptive_answers:
+        total_desc_score = 0
         for desc_answer in descriptive_answers:
             # Score based on length and content richness
             length_score = min(len(desc_answer) / 50, 1)  # Max score for 50+ chars
+
             # Bonus for containing specific educational terms
-            education_terms = ['student', 'teacher', 'school', 'class', 'learning', 'activity', 'meeting', 'enrollment']
+            education_terms = ['student', 'teacher', 'school', 'class', 'learning',
+                             'activity', 'meeting', 'enrollment', 'enrolment',
+                             'छात्र', 'शिक्षक', 'विद्यालय', 'कक्षा']  # Added Hindi terms
             term_count = sum(1 for term in education_terms if term.lower() in desc_answer.lower())
             term_score = min(term_count / 3, 1)  # Max score for 3+ terms
-            descriptive_score += (length_score + term_score) / 2
-        
-        avg_descriptive_score = descriptive_score / len(descriptive_answers) if descriptive_answers else 0
-        
-        if avg_descriptive_score >= 0.7:
-            return 'Highly Relevant'
-        elif avg_descriptive_score >= 0.4:
-            return 'Relevant'
-        elif avg_descriptive_score > 0:
-            return 'Partially Relevant'
-        else:
-            return 'Irrelevant'
+
+            # Avoid very short or generic answers
+            if len(desc_answer) < 10:
+                total_desc_score += 0.2  # Low score for very short answers
+            else:
+                total_desc_score += (length_score * 0.6 + term_score * 0.4)
+
+        descriptive_score = total_desc_score / len(descriptive_answers)
+
+    # Combine scores based on answer type distribution
+    if yes_no_answers and descriptive_answers:
+        # Mixed answers - weighted average based on count
+        yes_no_weight = len(yes_no_answers) / total_answers
+        descriptive_weight = len(descriptive_answers) / total_answers
+        combined_score = (yes_no_score * yes_no_weight) + (descriptive_score * descriptive_weight)
+    elif yes_no_answers:
+        # Only YES/NO answers
+        combined_score = yes_no_score
+    elif descriptive_answers:
+        # Only descriptive answers
+        combined_score = descriptive_score
+    else:
+        return 'Irrelevant'
+
+    # Determine relevance tag based on combined score
+    if combined_score >= 0.7:
+        return 'Relevant'
+    elif combined_score >= 0.4:
+        return 'Partially Relevant'
+    else:
+        return 'Irrelevant'
 
 def adjust_excel_formatting(output_file):
     # This function is for .xlsx, but the script now saves .csv
@@ -347,14 +368,18 @@ def rate_limiter():
         _request_times.append(time.time())
 
 
-def process_image(task_evidence_link, task_evidence_question, max_retries=3):
+def process_image(task_evidence_link, task_evidence_question, task_name=None, max_retries=3):
     global current_token_index
     retries = 0
     while retries < max_retries:
         try:
             rate_limiter()
             image = httpx.get(task_evidence_link)
-            
+
+            # Check if this is an enrollment-related task
+            is_enrollment_task = (task_name and
+                                 task_name.strip() == ENROLLMENT_TASK_FILTER.strip())
+
             # Flexible prompt that allows both YES/NO and descriptive answers
             prompt = f"""You are an educational evidence validator. Analyze the given image and answer these questions:
 
@@ -371,6 +396,18 @@ Focus on:
 - Relevance to the question
 - Quality and clarity of the evidence
 - Educational context and completeness"""
+
+            # Add enrollment-specific instructions if this is an enrollment task
+            if is_enrollment_task:
+                prompt += """
+
+IMPORTANT: If the image shows enrollment data, ALWAYS include these specific details in your answer:
+- The exact enrollment number for last year (2024)
+- The exact enrollment number for current year (2025)
+- The exact percentage increase (include negative sign if it's a decrease)
+
+Example format: "Last year (2024) enrollment: 150, Current year (2025) enrollment: 120, Percentage increase: -20%"
+"""
             
             response = model.generate_content([
                 {"mime_type": "image/jpeg", "data": base64.b64encode(image.content).decode("utf-8")},
@@ -442,7 +479,7 @@ def main(input_file, worker_id=None):
 
             if any(task_evidence.lower().endswith(ext) for ext in IMAGE_FORMATS):
                 logging.info(f"[Worker {worker_id}] Processing {'user-owned' if is_user_owned else 'standard'} task row {idx+1}/{len(df_filtered)}")
-                response = process_image(task_evidence, task_question)
+                response = process_image(task_evidence, task_question, task_name_raw)
                 if isinstance(response, dict) and "answers" in response and "reasonings" in response:
                     answers = response["answers"]
                     reasonings = response["reasonings"]
