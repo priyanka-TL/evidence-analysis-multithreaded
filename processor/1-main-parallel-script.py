@@ -34,23 +34,32 @@ STATE_NAME = os.getenv("STATE_NAME", "HARYANA")  # Default: HARYANA
 # Set to True for descriptive answers, False for YES/NO answers
 USE_DESCRIPTIVE_ANSWERS = True
 
-# ==== 🆕 EXTRA KEYS CONFIGURATION ====
+# ==== 🆕 ENROLLMENT CONFIGURATION ====
+# Configure which task should be processed for enrollment data (loaded from .env)
+ENROLLMENT_TASK_FILTER = os.getenv(
+    "ENROLLMENT_TASK_FILTER",
+    "5. Calculate percentage increase in enrolment from last year and create an enrolment report."
+)
+
 # Add any additional keys you want to extract here
 EXTRA_KEYS = {
     'Enrollment_2024': {
         'description': 'Enrollment count for 2024',
-        'extract_pattern': r'(?:last\s+year|previous\s+year|2024).*?enrolment.*?[\(\s]+(\d{1,4})\)?|enrolment.*?(?:last\s+year|previous\s+year).*?[\(\s]+(\d{1,4})\)?',
-        'data_type': 'int'
+        'extract_pattern': r'(?:last\s+year|previous\s+year|2024).*?(?:enrolment|enrollment|नामांकन).*?[:\(\s]+(\d{1,4})\)?|(?:enrolment|enrollment|नामांकन).*?(?:last\s+year|previous\s+year|2024).*?[:\(\s]+(\d{1,4})\)?',
+        'data_type': 'int',
+        'task_filter': True  # Only extract from specific task
     },
     'Enrollment_2025': {
         'description': 'Enrollment count for 2025',
-        'extract_pattern': r'(?:current\s+year|this\s+year|2025).*?enrolment.*?[\(\s]+(\d{1,4})\)?|enrolment.*?(?:current\s+year|this\s+year).*?[\(\s]+(\d{1,4})\)?',
-        'data_type': 'int'
+        'extract_pattern': r'(?:current\s+year|this\s+year|2025).*?(?:enrolment|enrollment|नामांकन).*?[:\(\s]+(\d{1,4})\)?|(?:enrolment|enrollment|नामांकन).*?(?:current\s+year|this\s+year|2025).*?[:\(\s]+(\d{1,4})\)?',
+        'data_type': 'int',
+        'task_filter': True  # Only extract from specific task
     },
     'Enrollment_Increase_Percentage': {
         'description': 'Percentage increase in enrollment',
-        'extract_pattern': r'(?:percentage\s+increase|increase).*?(?:is\s+)?(\d+(?:\.\d+)?)\s*%|(\d+(?:\.\d+)?)\s*%\s*(?:increase|growth|rise)',
-        'data_type': 'float'
+        'extract_pattern': r'(?:percentage\s+increase|increase|वृद्धि|प्रतिशत).*?(?:is\s+)?(\d+(?:\.\d+)?)\s*%|(\d+(?:\.\d+)?)\s*%\s*(?:increase|growth|rise|वृद्धि)',
+        'data_type': 'float',
+        'task_filter': True  # Only extract from specific task
     }
 }
 
@@ -154,19 +163,20 @@ model = genai.GenerativeModel(
 )
 
 # === 🆕 Extra Keys Extraction Function ===
-def extract_extra_keys(text_fields):
+def extract_extra_keys(text_fields, task_name=None):
     """
     Extract additional information based on EXTRA_KEYS configuration
-    
+
     Args:
         text_fields: Dict or list of text fields to search
-        
+        task_name: Name of the task being processed (for task filtering)
+
     Returns:
         Dict with extracted values for each extra key
     """
     if not ENABLE_EXTRA_KEYS:
         return {}
-    
+
     # Combine all text fields into one string
     if isinstance(text_fields, dict):
         combined_text = ' '.join(str(v) for v in text_fields.values() if v)
@@ -174,18 +184,25 @@ def extract_extra_keys(text_fields):
         combined_text = ' '.join(str(v) for v in text_fields if v)
     else:
         combined_text = str(text_fields)
-    
+
     combined_text = combined_text.lower()
-    
+
     extracted = {}
-    
+
     for key_name, config in EXTRA_KEYS.items():
         try:
+            # Check if this key requires task filtering
+            if config.get('task_filter', False):
+                # Only extract if task matches ENROLLMENT_TASK_FILTER
+                if task_name is None or task_name.strip() != ENROLLMENT_TASK_FILTER.strip():
+                    extracted[key_name] = None
+                    continue
+
             pattern = config['extract_pattern']
             data_type = config['data_type']
-            
+
             matches = re.findall(pattern, combined_text, re.IGNORECASE)
-            
+
             if matches:
                 # Handle tuple results from multiple capture groups
                 if isinstance(matches[0], tuple):
@@ -196,7 +213,7 @@ def extract_extra_keys(text_fields):
                         continue
                 else:
                     value = matches[0]
-                
+
                 # Convert to appropriate data type
                 if data_type == 'int':
                     extracted[key_name] = int(value)
@@ -442,7 +459,7 @@ def main(input_file, worker_id=None):
                             'Answers': ' '.join(str(a) for a in answers),
                             'Reasonings': ' '.join(str(r) for r in reasonings)
                         }
-                        extracted = extract_extra_keys(text_to_analyze)
+                        extracted = extract_extra_keys(text_to_analyze, task_name_raw)
                         for key in EXTRA_KEYS.keys():
                             extra_keys_data[key].append(extracted.get(key))
                     else:
@@ -476,11 +493,11 @@ def main(input_file, worker_id=None):
         df_filtered["Relevance Tag"] = relevance_tags
         df_filtered["Task Type"] = task_types
         
-        # 🆕 Add extra keys columns
+        # 🆕 Add extra keys columns (without "Extra_" prefix)
         if ENABLE_EXTRA_KEYS:
             for key_name, values in extra_keys_data.items():
-                df_filtered[f"Extra_{key_name}"] = values
-                logging.info(f"[Worker {worker_id}] Added extra key column: Extra_{key_name}")
+                df_filtered[key_name] = values
+                logging.info(f"[Worker {worker_id}] Added extra key column: {key_name}")
         
         # ✅ Remove IMAGE() formula for CSV - it's Excel-specific
         df_filtered["Image Preview"] = df_filtered["Task Evidence"].apply(
@@ -620,13 +637,12 @@ if __name__ == "__main__":
             
             # 🆕 Log final extra keys statistics
             if ENABLE_EXTRA_KEYS:
-                logging.info(f"[Main] Final extra keys statistics:")
+                logging.info(f"[Main] Final enrollment statistics:")
                 for key_name in EXTRA_KEYS.keys():
-                    col_name = f"Extra_{key_name}"
-                    if col_name in merged_df.columns:
-                        non_null = merged_df[col_name].notna().sum()
+                    if key_name in merged_df.columns:
+                        non_null = merged_df[key_name].notna().sum()
                         total = len(merged_df)
-                        logging.info(f"   - {col_name}: {non_null}/{total} ({non_null/total*100:.1f}%)")
+                        logging.info(f"   - {key_name}: {non_null}/{total} ({non_null/total*100:.1f}%)")
         except Exception as e:
             logging.exception(f"[Main] Error during merging: {e}")
             exit(1)
