@@ -681,7 +681,8 @@
                     <canvas id="submissionVolumeLine"></canvas>
                 </div>
 
-                <div class="pie-charts">
+                <!-- Subject & Grade Pie Charts - State Specific -->
+                <div class="pie-charts" id="subjectGradePieCharts">
                     <div class="pie-chart-container">
                         <div class="chart-title">Subject Distribution</div>
                         <canvas id="subjectPie"></canvas>
@@ -696,7 +697,11 @@
             <div class="report-section section-to-break">
                 <h2 class="section-title">🎯 Quality & Relevance Analysis</h2>
                 <div class="table-responsive" id="relevanceTable"></div>
-                <div class="table-responsive" id="relBySubjectGrade"></div>
+                
+                <!-- Subject & Grade Analysis - State Specific -->
+                <div id="subjectGradeSection" class="hidden">
+                    <div class="table-responsive" id="relBySubjectGrade"></div>
+                </div>
                 
                 <div class="chart-container">
                     <div class="chart-title">Task Completion Analysis</div>
@@ -989,6 +994,10 @@
 
     function generateReport(data) {
         const totalEvidence = data.length;
+        
+        // Detect state(s) early for state-specific features
+        const statesInDataUpper = new Set(data.map(row => (row["Declared State"] || "").trim().toUpperCase()));
+        
         const relevanceCounts = { Relevant:0, "Partially Relevant":0, Irrelevant:0 };
         const userSet = new Set();
         const schoolSet = new Set();
@@ -1286,43 +1295,55 @@
             } 
         });
 
-        if(window.subjectPieChart) window.subjectPieChart.destroy();
-        window.subjectPieChart = new Chart(document.getElementById('subjectPie'), { 
-            type: 'doughnut', 
-            data: { 
-                labels: Object.keys(subjects), 
-                datasets: [{ 
-                    data: Object.values(subjects), 
-                    backgroundColor: ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#feca57'], 
-                    borderWidth: 0 
-                }] 
-            }, 
-            options: { 
-                animation: false, 
-                responsive: true, 
-                cutout: '60%', 
-                plugins: { legend: { position: 'bottom' } } 
-            } 
-        });
+        // Subject & Grade Pie Charts (State-specific: Bihar only)
+        const subjectGradeChartStates = ["BIHAR"];
+        const shouldShowSubjectGradeCharts = Array.from(statesInDataUpper).some(state => 
+            subjectGradeChartStates.includes(state)
+        );
 
-        if(window.gradePieChart) window.gradePieChart.destroy();
-        window.gradePieChart = new Chart(document.getElementById('gradePie'), { 
-            type: 'doughnut', 
-            data: { 
-                labels: Object.keys(grades), 
-                datasets: [{ 
-                    data: Object.values(grades), 
-                    backgroundColor: ['#a8e6cf', '#dcedc1', '#ffd3a5', '#fd9853', '#ff8a80'], 
-                    borderWidth: 0 
-                }] 
-            }, 
-            options: { 
-                animation: false, 
-                responsive: true, 
-                cutout: '60%', 
-                plugins: { legend: { position: 'bottom' } } 
-            } 
-        });
+        if (shouldShowSubjectGradeCharts) {
+            document.getElementById('subjectGradePieCharts').style.display = 'flex';
+            
+            if(window.subjectPieChart) window.subjectPieChart.destroy();
+            window.subjectPieChart = new Chart(document.getElementById('subjectPie'), { 
+                type: 'doughnut', 
+                data: { 
+                    labels: Object.keys(subjects), 
+                    datasets: [{ 
+                        data: Object.values(subjects), 
+                        backgroundColor: ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#feca57'], 
+                        borderWidth: 0 
+                    }] 
+                }, 
+                options: { 
+                    animation: false, 
+                    responsive: true, 
+                    cutout: '60%', 
+                    plugins: { legend: { position: 'bottom' } } 
+                } 
+            });
+
+            if(window.gradePieChart) window.gradePieChart.destroy();
+            window.gradePieChart = new Chart(document.getElementById('gradePie'), { 
+                type: 'doughnut', 
+                data: { 
+                    labels: Object.keys(grades), 
+                    datasets: [{ 
+                        data: Object.values(grades), 
+                        backgroundColor: ['#a8e6cf', '#dcedc1', '#ffd3a5', '#fd9853', '#ff8a80'], 
+                        borderWidth: 0 
+                    }] 
+                }, 
+                options: { 
+                    animation: false, 
+                    responsive: true, 
+                    cutout: '60%', 
+                    plugins: { legend: { position: 'bottom' } } 
+                } 
+            });
+        } else {
+            document.getElementById('subjectGradePieCharts').style.display = 'none';
+        }
 
         // Relevance Table
         document.getElementById('relevanceTable').innerHTML = `
@@ -1346,52 +1367,62 @@
             </table>
         `;
 
-        // Relevance by Subject & Grade
-        let relSG = {};
-        data.forEach(row => { 
-            const subj = parseSubject(row["Tasks"]); 
-            const grade = parseGrade(row["Tasks"]); 
-            const key = subj+"_"+grade; 
-            if (!relSG[key]) relSG[key] = { Relevant:0, "Partially Relevant":0, Irrelevant:0, total:0 }; 
-            relSG[key].total++; 
-            const rel = row["Relevance Tag"]; 
-            if (rel && relSG[key][rel] !== undefined) relSG[key][rel]++; 
-        });
+        // Relevance by Subject & Grade (State-specific: Bihar only)
+        const subjectGradeStates = ["BIHAR"]; // States that use subject/grade tracking
+        const shouldShowSubjectGrade = Array.from(statesInDataUpper).some(state => 
+            subjectGradeStates.includes(state)
+        );
 
-        let relSGHtml = `
-            <table>
-                <thead>
+        if (shouldShowSubjectGrade) {
+            let relSG = {};
+            data.forEach(row => { 
+                const subj = parseSubject(row["Tasks"]); 
+                const grade = parseGrade(row["Tasks"]); 
+                const key = subj+"_"+grade; 
+                if (!relSG[key]) relSG[key] = { Relevant:0, "Partially Relevant":0, Irrelevant:0, total:0 }; 
+                relSG[key].total++; 
+                const rel = row["Relevance Tag"]; 
+                if (rel && relSG[key][rel] !== undefined) relSG[key][rel]++; 
+            });
+
+            let relSGHtml = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Subject</th>
+                            <th>Grade</th>
+                            <th>Relevant</th>
+                            <th>Partially Relevant</th>
+                            <th>Irrelevant</th>
+                            <th>Total</th>
+                            <th>% Relevant</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            const sortedSG = Object.keys(relSG).sort();
+            for (const k of sortedSG) { 
+                const [s,g] = k.split("_"); 
+                const r = relSG[k]; 
+                const relevantPercent = r.total > 0 ? ((r.Relevant/r.total)*100).toFixed(1) : 0; 
+                relSGHtml += `
                     <tr>
-                        <th>Subject</th>
-                        <th>Grade</th>
-                        <th>Relevant</th>
-                        <th>Partially Relevant</th>
-                        <th>Irrelevant</th>
-                        <th>Total</th>
-                        <th>% Relevant</th>
+                        <td>${s}</td>
+                        <td>${g}</td>
+                        <td>${r.Relevant}</td>
+                        <td>${r["Partially Relevant"]}</td>
+                        <td>${r.Irrelevant}</td>
+                        <td>${r.total}</td>
+                        <td><span class="percentage-badge">${relevantPercent}%</span></td>
                     </tr>
-                </thead>
-                <tbody>
-        `;
-        const sortedSG = Object.keys(relSG).sort();
-        for (const k of sortedSG) { 
-            const [s,g] = k.split("_"); 
-            const r = relSG[k]; 
-            const relevantPercent = r.total > 0 ? ((r.Relevant/r.total)*100).toFixed(1) : 0; 
-            relSGHtml += `
-                <tr>
-                    <td>${s}</td>
-                    <td>${g}</td>
-                    <td>${r.Relevant}</td>
-                    <td>${r["Partially Relevant"]}</td>
-                    <td>${r.Irrelevant}</td>
-                    <td>${r.total}</td>
-                    <td><span class="percentage-badge">${relevantPercent}%</span></td>
-                </tr>
-            `; 
+                `; 
+            }
+            relSGHtml += "</tbody></table>";
+            document.getElementById('relBySubjectGrade').innerHTML = relSGHtml;
+            document.getElementById('subjectGradeSection').classList.remove('hidden');
+        } else {
+            document.getElementById('subjectGradeSection').classList.add('hidden');
         }
-        relSGHtml += "</tbody></table>";
-        document.getElementById('relBySubjectGrade').innerHTML = relSGHtml;
 
         // Task Completion Chart
         if(window.taskCompletionChart) window.taskCompletionChart.destroy();
@@ -1569,8 +1600,7 @@
         generateStateMap(districtStats, primaryState);
 
         // NEW: Generate enrollment analytics if data exists AND state requires it
-        // Get unique states from data
-        const statesInDataUpper = new Set(data.map(row => (row["Declared State"] || "").trim().toUpperCase()));
+        // statesInDataUpper already defined at top of function
         const enrollmentStates = ["HARYANA", "HIMACHAL PRADESH", "PUNJAB"]; // States that need enrollment tracking
         const shouldShowEnrollment = Array.from(statesInDataUpper).some(state => 
             enrollmentStates.includes(state)
