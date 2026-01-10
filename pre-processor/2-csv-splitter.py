@@ -3,9 +3,10 @@ import os
 from math import ceil
 
 # Configuration
-INPUT_CSV = "/Users/user/Documents/AI/parallel-process/output-pre-processor/split_1.csv"
+INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/pre-processor/output-pre-processor/split_1.csv"
 OUTPUT_DIR = "parallel_input_split_1_files"
-PARTS = 20
+# no of rows to split into
+PARTS = 5
 
 # Create output directory if it doesn't exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
