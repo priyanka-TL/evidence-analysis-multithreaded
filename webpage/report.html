@@ -2060,7 +2060,7 @@
         });
         
         if (!(isFinite(minX) && isFinite(minY) && isFinite(maxX) && isFinite(maxY))) { 
-            document.getElementById('biharMap').innerHTML = '<div style="padding:20px; color:#ff6b6b;">Invalid GeoJSON geometry.</div>'; 
+            document.getElementById('stateMap').innerHTML = '<div style="padding:20px; color:#ff6b6b;">Invalid GeoJSON geometry.</div>'; 
             return; 
         }
         
@@ -2146,16 +2146,18 @@
         loadingDiv.innerHTML = '<div><div class="spinner" style="border: 4px solid #f3f3f3; border-top: 4px solid #4facfe; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto 20px;"></div>Generating PDF...</div>';
         document.body.appendChild(loadingDiv);
 
-        const mapContainer = document.getElementById('biharMap');
-        const originalMapHTML = mapContainer.innerHTML;
+        const mapContainer = document.getElementById('stateMap');
+        const originalMapHTML = mapContainer ? mapContainer.innerHTML : '';
         
-        mapContainer.innerHTML = `
-            <div style="width: 100%; height: 500px; display: flex; align-items: center; justify-content: center; background: #f8f9fa; border: 1px dashed #ccc; border-radius: 8px;">
-                <p style="color: #666; font-size: 16px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
-                    Map is available in the interactive HTML report.
-                </p>
-            </div>
-        `;
+        if (mapContainer) {
+            mapContainer.innerHTML = `
+                <div style="width: 100%; height: 500px; display: flex; align-items: center; justify-content: center; background: #f8f9fa; border: 1px dashed #ccc; border-radius: 8px;">
+                    <p style="color: #666; font-size: 16px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+                        Map is available in the interactive HTML report.
+                    </p>
+                </div>
+            `;
+        }
 
         setTimeout(() => {
             const contentWidthPx = element.offsetWidth;
@@ -2187,8 +2189,10 @@
             };
 
             html2pdf().set(opt).from(element).save().finally(() => {
-                mapContainer.innerHTML = originalMapHTML;
-                addTooltipHandlers();
+                if (mapContainer && originalMapHTML) {
+                    mapContainer.innerHTML = originalMapHTML;
+                    addTooltipHandlers();
+                }
                 if (loadingDiv) loadingDiv.remove();
             });
         }, 100);
