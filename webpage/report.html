@@ -1563,13 +1563,29 @@
         window.currentDistrictStats = districtStats;
         generateBiharMap(districtStats);
 
-        // NEW: Generate enrollment analytics if data exists
-        console.log('Enrollment check:', { hasEnrollmentData, districtCount: Object.keys(enrollmentStats).length });
-        if (hasEnrollmentData && Object.keys(enrollmentStats).length > 0) {
+        // NEW: Generate enrollment analytics if data exists AND state requires it
+        // Get unique states from data
+        const statesInData = new Set(data.map(row => (row["Declared State"] || "").trim().toUpperCase()));
+        const enrollmentStates = ["HARYANA", "HIMACHAL PRADESH", "PUNJAB"]; // States that need enrollment tracking
+        const shouldShowEnrollment = Array.from(statesInData).some(state => 
+            enrollmentStates.includes(state)
+        );
+
+        console.log('Enrollment check:', { 
+            hasEnrollmentData, 
+            districtCount: Object.keys(enrollmentStats).length,
+            statesInData: Array.from(statesInData),
+            shouldShowEnrollment 
+        });
+
+        if (hasEnrollmentData && Object.keys(enrollmentStats).length > 0 && shouldShowEnrollment) {
             generateEnrollmentAnalytics(enrollmentStats);
         } else {
-            // Hide enrollment section if no data
-            console.log('Hiding enrollment section - no data found');
+            // Hide enrollment section if no data or state doesn't require it
+            console.log('Hiding enrollment section - ', 
+                !hasEnrollmentData ? 'no data found' : 
+                !shouldShowEnrollment ? 'state does not require enrollment tracking' : 
+                'insufficient enrollment data');
             document.getElementById('enrollmentSection').classList.add('hidden');
         }
     }

@@ -95,30 +95,10 @@ def extract_enrollment_data(text_fields):
     return [int(n) for n in numbers if int(n) < 10000 and int(n) > 0]  # Reasonable enrollment range
 
 def aggregate_extra_keys(group_df, extra_columns):
-    """Aggregate enrollment values for a group - only avg and sum"""
-    aggregated = {}
-
-    for col in extra_columns:
-        values = group_df[col].dropna()
-
-        if len(values) == 0:
-            aggregated[col] = None
-            continue
-
-        # Only numeric aggregation for enrollment data
-        try:
-            numeric_values = pd.to_numeric(values, errors='coerce').dropna()
-            if len(numeric_values) > 0:
-                # Only keep avg and sum for enrollment
-                aggregated[f"{col}_avg"] = numeric_values.mean()
-                aggregated[f"{col}_sum"] = numeric_values.sum()
-                aggregated[f"{col}_count"] = len(numeric_values)
-            else:
-                aggregated[f"{col}_count"] = len(values)
-        except:
-            aggregated[f"{col}_count"] = len(values)
-
-    return aggregated
+    """Aggregate enrollment values for a group - simplified version"""
+    # This function is no longer needed as we're not adding aggregation columns
+    # Keeping it for compatibility but it won't be used
+    return {}
 
 def build_hierarchy(df):
     """Build nested hierarchy with enrollment counts and extra keys"""
@@ -218,19 +198,8 @@ def calculate_stats(hierarchy_dict):
             # Count unique schools
             data['_school_count'] = len(data.get('_schools', set()))
             
-            # 🆕 Aggregate extra keys
-            data['_extra_keys_agg'] = {}
-            for col, values in data.get('_extra_keys', {}).items():
-                if values:
-                    try:
-                        # Only numeric aggregation for enrollment - avg and sum only
-                        numeric_values = [float(v) for v in values if v is not None]
-                        if numeric_values:
-                            data['_extra_keys_agg'][f"{col}_avg"] = np.mean(numeric_values)
-                            data['_extra_keys_agg'][f"{col}_sum"] = sum(numeric_values)
-                            data['_extra_keys_agg'][f"{col}_count"] = len(numeric_values)
-                    except:
-                        data['_extra_keys_agg'][f"{col}_count"] = len(values)
+            # 🆕 Aggregate extra keys - REMOVED: No longer adding _avg, _sum, _count columns
+            # The original enrollment columns are already in the data
 
 calculate_stats(enrollment_hierarchy)
 
@@ -262,9 +231,8 @@ def flatten_hierarchy(hierarchy_dict, parent_path=None):
                 'Enrollment_Data_Points': data['_enrollment_count']
             }
             
-            # 🆕 Add aggregated extra keys
-            for agg_key, agg_value in data.get('_extra_keys_agg', {}).items():
-                record[agg_key] = agg_value
+            # 🆕 No longer adding aggregated extra keys - they create redundant columns
+            # The original enrollment columns are preserved in the main dataframe
             
             # Add hierarchical columns
             for i, level in enumerate(hierarchy_levels):
@@ -298,18 +266,14 @@ for _, row in summary_df.iterrows():
         'Relevant_Count': row['Relevant_Count']
     }
     
-    # 🆕 Add enrollment aggregations to lookup
-    for col in enrollment_columns:
-        for suffix in ['_avg', '_sum', '_count']:
-            col_name = f"{col}{suffix}"
-            if col_name in summary_df.columns:
-                lookup_data[col_name] = row.get(col_name)
+    # 🆕 REMOVED: No longer adding aggregation columns (_avg, _sum, _count)
+    # Original enrollment columns are already in the data
     
     enrollment_lookup[key] = lookup_data
 
 # Add enrollment analytics columns to original dataframe
 def add_enrollment_columns(row):
-    """Add enrollment analytics for each row"""
+    """Add enrollment analytics for each row - simplified version"""
     path_parts = []
     for level in hierarchy_levels:
         if level in row and not pd.isna(row[level]):
@@ -320,17 +284,13 @@ def add_enrollment_columns(row):
     if path in enrollment_lookup:
         return pd.Series(enrollment_lookup[path])
     else:
+        # Return default values only for the 4 analytics columns
         default_data = {
             'School_Count': 0,
             'Avg_Enrollment': 0,
             'Evidence_Count': 0,
             'Relevant_Count': 0
         }
-        # Add default values for extra keys
-        for col in extra_key_columns:
-            default_data[f"{col}_avg"] = 0
-            default_data[f"{col}_sum"] = 0
-            default_data[f"{col}_count"] = 0
         return pd.Series(default_data)
 
 # Apply enrollment data

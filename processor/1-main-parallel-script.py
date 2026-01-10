@@ -45,19 +45,19 @@ ENROLLMENT_TASK_FILTER = os.getenv(
 EXTRA_KEYS = {
     'Enrollment_2024': {
         'description': 'Enrollment count for 2024',
-        'extract_pattern': r'(?:last\s+year|previous\s+year).*?(?:enrolment|enrollment|नामांकन).*?[:\s]+(\d{1,4})|(?:enrolment|enrollment|नामांकन).*?(?:last\s+year|previous\s+year).*?[:\s]+(\d{1,4})|2024.*?(?:enrolment|enrollment|नामांकन).*?[:\s]+(\d{1,4})|(?:enrolment|enrollment|नामांकन).*?2024.*?[:\s]+(\d{1,4})',
+        'extract_pattern': r'(?:total\s+enrolment\s+number\s+from\s+last\s+year|last\s+year.*?enrol(?:l|)ment.*?number|previous\s+year.*?enrol(?:l|)ment).*?[:\s]+(\d{1,4})|(?:enrol(?:l|)ment|नामांकन).*?(?:last\s+year|previous\s+year|2024).*?[:\s]+(\d{1,4})|(?:last\s+year|2024).*?[:\s]+(\d{1,4})(?!\s*%)',
         'data_type': 'int',
         'task_filter': True  # Only extract from specific task
     },
     'Enrollment_2025': {
         'description': 'Enrollment count for 2025',
-        'extract_pattern': r'(?:current\s+year|this\s+year).*?(?:enrolment|enrollment|नामांकन).*?[:\s]+(\d{1,4})|(?:enrolment|enrollment|नामांकन).*?(?:current\s+year|this\s+year).*?[:\s]+(\d{1,4})|2025.*?(?:enrolment|enrollment|नामांकन).*?[:\s]+(\d{1,4})|(?:enrolment|enrollment|नामांकन).*?2025.*?[:\s]+(\d{1,4})',
+        'extract_pattern': r'(?:total\s+enrolment\s+number\s+from\s+current\s+year|current\s+year.*?enrol(?:l|)ment.*?number|this\s+year.*?enrol(?:l|)ment).*?[:\s]+(\d{1,4})|(?:enrol(?:l|)ment|नामांकन).*?(?:current\s+year|this\s+year|2025).*?[:\s]+(\d{1,4})|(?:current\s+year|2025).*?[:\s]+(\d{1,4})(?!\s*%)',
         'data_type': 'int',
         'task_filter': True  # Only extract from specific task
     },
     'Enrollment_Increase_Percentage': {
         'description': 'Percentage increase in enrollment',
-        'extract_pattern': r'(?:percentage\s+increase|increase|वृद्धि|प्रतिशत).*?(?:is\s+)?(-?\d+(?:\.\d+)?)\s*%|(-?\d+(?:\.\d+)?)\s*%\s*(?:increase|growth|rise|वृद्धि|decrease|decline)',
+        'extract_pattern': r'(?:percentage\s+increase|%\s+increase|increase.*?percentage).*?(?:is\s+)?(-?\d+(?:\.\d+)?)\s*%|(-?\d+(?:\.\d+)?)\s*%\s*(?:increase|growth|rise|वृद्धि|decrease|decline)',
         'data_type': 'float',
         'task_filter': True  # Only extract from specific task
     }
@@ -149,16 +149,34 @@ class AnalysisResponse(typing.TypedDict):
     answers: list[str]
     reasonings: list[str]
 
+class EnrollmentAnalysisResponse(typing.TypedDict):
+    answers: list[str]
+    reasonings: list[str]
+    enrollment_2024: int | None
+    enrollment_2025: int | None
+    enrollment_increase_percentage: float | None
+
 initial_token = get_next_gemini_token()
 if not initial_token:
     raise ValueError("[Gemini] No valid Gemini tokens found!")
 
 genai.configure(api_key=initial_token)
+
+# Standard model for regular tasks
 model = genai.GenerativeModel(
     model_name="gemini-2.0-flash",
     generation_config={
         "response_mime_type": "application/json",
         "response_schema": AnalysisResponse,
+    },
+)
+
+# Enrollment model with enhanced schema
+enrollment_model = genai.GenerativeModel(
+    model_name="gemini-2.0-flash",
+    generation_config={
+        "response_mime_type": "application/json",
+        "response_schema": EnrollmentAnalysisResponse,
     },
 )
 
@@ -193,8 +211,12 @@ def extract_extra_keys(text_fields, task_name=None):
         try:
             # Check if this key requires task filtering
             if config.get('task_filter', False):
+                # Normalize both task names for comparison
+                task_name_normalized = task_name.strip().rstrip("'.\"").strip() if task_name else None
+                enrollment_filter_normalized = ENROLLMENT_TASK_FILTER.strip().rstrip("'.\"").strip()
+                
                 # Only extract if task matches ENROLLMENT_TASK_FILTER
-                if task_name is None or task_name.strip() != ENROLLMENT_TASK_FILTER.strip():
+                if task_name_normalized is None or task_name_normalized != enrollment_filter_normalized:
                     extracted[key_name] = None
                     continue
 
@@ -229,6 +251,156 @@ def extract_extra_keys(text_fields, task_name=None):
             extracted[key_name] = None
     
     return extracted
+
+# === 🆕 Enrollment Data Validation Function ===
+def validate_and_fix_enrollment_data(enr_2024, enr_2025, enr_pct, answers_text, reasonings_text):
+    """
+    Validate enrollment data from API response and apply sanity checks.
+    
+    Args:
+        enr_2024: Enrollment count for 2024 (from API JSON)
+        enr_2025: Enrollment count for 2025 (from API JSON)
+        enr_pct: Percentage increase (from API JSON)
+        answers_text: Combined answers text (for logging)
+        reasonings_text: Combined reasonings text (for logging)
+    
+    Returns:
+        Tuple of (validated_2024, validated_2025, validated_pct)
+    """
+    original_2024 = enr_2024
+    original_2025 = enr_2025
+    original_pct = enr_pct
+    
+    issues_found = []
+    
+    # ========== SANITY CHECK 1: Same value in all fields ==========
+    if enr_2024 is not None and enr_2025 is not None and enr_pct is not None:
+        if enr_2024 == enr_2025 == enr_pct:
+            issues_found.append(f"Same value in all fields: {enr_2024}")
+            # This is clearly wrong - keep only the one that makes sense
+            if -100 <= enr_2024 <= 300:
+                # Looks like a percentage, keep only that
+                enr_pct = enr_2024
+                enr_2024 = None
+                enr_2025 = None
+            else:
+                # Doesn't look like percentage, nullify all
+                enr_2024 = None
+                enr_2025 = None
+                enr_pct = None
+    
+    # ========== SANITY CHECK 2: Year numbers as counts ==========
+    if enr_2024 is not None and int(enr_2024) in [2024, 2025]:
+        issues_found.append(f"Year number {int(enr_2024)} extracted as 2024 count")
+        enr_2024 = None
+    
+    if enr_2025 is not None and int(enr_2025) in [2024, 2025]:
+        issues_found.append(f"Year number {int(enr_2025)} extracted as 2025 count")
+        enr_2025 = None
+    
+    # ========== SANITY CHECK 3: Unrealistic enrollment counts ==========
+    if enr_2024 is not None:
+        if enr_2024 < 5 or enr_2024 > 10000:
+            issues_found.append(f"2024 count {enr_2024} outside realistic range (5-10000)")
+            enr_2024 = None
+    
+    if enr_2025 is not None:
+        if enr_2025 < 5 or enr_2025 > 10000:
+            issues_found.append(f"2025 count {enr_2025} outside realistic range (5-10000)")
+            enr_2025 = None
+    
+    # ========== SANITY CHECK 4: Unrealistic percentage ==========
+    if enr_pct is not None:
+        if abs(enr_pct) > 500:  # More than 500% change is unrealistic
+            issues_found.append(f"Percentage {enr_pct}% is unrealistic")
+            enr_pct = None
+    
+    # ========== SANITY CHECK 5: Percentage as count or vice versa ==========
+    # If a count looks like a typical percentage (single or double digit)
+    if enr_2024 is not None and enr_2025 is not None:
+        if (enr_2024 < 100 and enr_2025 < 100) and enr_pct is None:
+            # Both counts are < 100 and no percentage - might be swapped
+            issues_found.append(f"Both counts < 100 ({enr_2024}, {enr_2025}) - might be percentages")
+    
+    # ========== FALLBACK: Extract from text if API didn't provide counts ==========
+    if (enr_2024 is None or enr_2025 is None) and answers_text:
+        logging.info(f"[Validation] API didn't provide counts. Attempting text extraction...")
+        combined_text = f"{answers_text} {reasonings_text}".lower()
+        
+        # Pattern 1: Look for "Total enrolment number from last year: 120"
+        if enr_2024 is None:
+            patterns_2024 = [
+                r'total\s+enrol(?:l|)ment\s+(?:number\s+)?(?:from\s+)?last\s+year[:\s]+(\d{2,4})',
+                r'last\s+year.*?enrol(?:l|)ment.*?[:\s](\d{2,4})',
+                r'enrol(?:l|)ment.*?last\s+year.*?[:\s](\d{2,4})',
+                r'previous\s+year.*?[:\s](\d{2,4})',
+            ]
+            for pattern in patterns_2024:
+                matches = re.findall(pattern, combined_text, re.IGNORECASE)
+                if matches:
+                    for match in matches:
+                        try:
+                            val = int(match)
+                            # Valid enrollment: not a year number, realistic range
+                            if 5 <= val <= 9999 and val not in [2024, 2025]:
+                                enr_2024 = val
+                                logging.info(f"[Validation] Extracted 2024 count from text: {enr_2024}")
+                                break
+                        except:
+                            continue
+                if enr_2024:
+                    break
+        
+        # Pattern 2: Look for "Total enrolment number from current year: 144"
+        if enr_2025 is None:
+            patterns_2025 = [
+                r'total\s+enrol(?:l|)ment\s+(?:number\s+)?(?:from\s+)?current\s+year[:\s]+(\d{2,4})',
+                r'current\s+year.*?enrol(?:l|)ment.*?[:\s](\d{2,4})',
+                r'enrol(?:l|)ment.*?current\s+year.*?[:\s](\d{2,4})',
+                r'this\s+year.*?[:\s](\d{2,4})',
+            ]
+            for pattern in patterns_2025:
+                matches = re.findall(pattern, combined_text, re.IGNORECASE)
+                if matches:
+                    for match in matches:
+                        try:
+                            val = int(match)
+                            if 5 <= val <= 9999 and val not in [2024, 2025]:
+                                enr_2025 = val
+                                logging.info(f"[Validation] Extracted 2025 count from text: {enr_2025}")
+                                break
+                        except:
+                            continue
+                if enr_2025:
+                    break
+    
+    # ========== CALCULATION: If we have 2 values, calculate the 3rd ==========
+    if enr_2024 is not None and enr_2025 is not None and enr_pct is None:
+        # Calculate percentage from counts
+        if enr_2024 > 0:
+            enr_pct = round(((enr_2025 - enr_2024) / enr_2024) * 100, 2)
+            logging.info(f"[Validation] Calculated percentage: {enr_pct}%")
+    
+    elif enr_2024 is not None and enr_pct is not None and enr_2025 is None:
+        # Calculate 2025 from 2024 and percentage
+        enr_2025 = int(round(enr_2024 * (1 + enr_pct / 100)))
+        logging.info(f"[Validation] Calculated 2025 count: {enr_2025}")
+    
+    elif enr_2025 is not None and enr_pct is not None and enr_2024 is None:
+        # Calculate 2024 from 2025 and percentage
+        if enr_pct != -100:  # Avoid division by zero
+            enr_2024 = int(round(enr_2025 / (1 + enr_pct / 100)))
+            logging.info(f"[Validation] Calculated 2024 count: {enr_2024}")
+    
+    # ========== LOGGING ==========
+    if issues_found:
+        logging.warning(f"[Validation] Issues detected: {'; '.join(issues_found)}")
+        logging.info(f"[Validation] BEFORE: 2024={original_2024}, 2025={original_2025}, %={original_pct}")
+        logging.info(f"[Validation] AFTER:  2024={enr_2024}, 2025={enr_2025}, %={enr_pct}")
+    else:
+        logging.info(f"[Validation] Data looks good: 2024={enr_2024}, 2025={enr_2025}, %={enr_pct}")
+    
+    return enr_2024, enr_2025, enr_pct
 
 # === Utility functions ===
 def calculate_relevance_tag(answers):
@@ -376,9 +548,13 @@ def process_image(task_evidence_link, task_evidence_question, task_name=None, ma
             rate_limiter()
             image = httpx.get(task_evidence_link)
 
-            # Check if this is an enrollment-related task
-            is_enrollment_task = (task_name and
-                                 task_name.strip() == ENROLLMENT_TASK_FILTER.strip())
+            # Check if this is an enrollment-related task (normalize both sides)
+            task_name_normalized_check = (task_name.strip().rstrip("'.\"").strip() if task_name else "")
+            filter_normalized_check = ENROLLMENT_TASK_FILTER.strip().rstrip("'.\"").strip()
+            is_enrollment_task = (task_name_normalized_check == filter_normalized_check)
+            
+            if is_enrollment_task:
+                logging.info(f"[Enrollment] Model selection: Using enrollment_model for task '{task_name_normalized_check}'")
 
             # Flexible prompt that allows both YES/NO and descriptive answers
             prompt = f"""You are an educational evidence validator. Analyze the given image and answer these questions:
@@ -397,19 +573,102 @@ Focus on:
 - Quality and clarity of the evidence
 - Educational context and completeness"""
 
-            # Add enrollment-specific instructions if this is an enrollment task
+            # Select model and update prompt based on task type
+            selected_model = model
             if is_enrollment_task:
+                selected_model = enrollment_model
                 prompt += """
 
-IMPORTANT: If the image shows enrollment data, ALWAYS include these specific details in your answer:
-- The exact enrollment number for last year (2024)
-- The exact enrollment number for current year (2025)
-- The exact percentage increase (include negative sign if it's a decrease)
+====================================================================================
+⚠️ CRITICAL: ENROLLMENT DATA EXTRACTION FROM REPORT IMAGE ⚠️
+====================================================================================
 
-Example format: "Last year (2024) enrollment: 150, Current year (2025) enrollment: 120, Percentage increase: -20%"
+You are analyzing an ENROLLMENT REPORT table/image. You MUST extract THREE DIFFERENT numerical values:
+
+📊 VALUE 1: enrollment_2024 (INTEGER - Student Count)
+   WHERE TO FIND: Look for column headers or labels like:
+   - "Total enrolment number from last year"
+   - "Last Year Enrolment" 
+   - "Previous Year"
+   - Near the year "2024"
+   
+   WHAT TO EXTRACT: The STUDENT COUNT (typically 10-9999 range)
+   ❌ DO NOT extract: The year "2024" itself
+   ❌ DO NOT extract: Percentages
+   ✅ EXAMPLE: If table shows "Total enrolment from last year: 120" → return 120
+   ✅ EXAMPLE: If table shows "2024: 85 students" → return 85
+   
+📊 VALUE 2: enrollment_2025 (INTEGER - Student Count)  
+   WHERE TO FIND: Look for column headers or labels like:
+   - "Total enrolment number from current year"
+   - "Current Year Enrolment"
+   - "This Year"
+   - Near the year "2025"
+   
+   WHAT TO EXTRACT: The STUDENT COUNT (typically 10-9999 range)
+   ❌ DO NOT extract: The year "2025" itself
+   ❌ DO NOT extract: Percentages
+   ✅ EXAMPLE: If table shows "Total enrolment from current year: 144" → return 144
+   ✅ EXAMPLE: If table shows "2025: 96 students" → return 96
+
+📊 VALUE 3: enrollment_increase_percentage (FLOAT - Percentage Value)
+   WHERE TO FIND: Look for column headers or labels like:
+   - "% increase"
+   - "Percentage increase" 
+   - "Growth %"
+   - Usually has a "%" symbol
+   
+   WHAT TO EXTRACT: The PERCENTAGE number (can be negative)
+   ✅ EXAMPLE: If shows "% increase: 8%" → return 8.0
+   ✅ EXAMPLE: If shows "-20%" → return -20.0
+   ✅ EXAMPLE: If shows "20% growth" → return 20.0
+
+====================================================================================
+❌ COMMON MISTAKES TO AVOID:
+====================================================================================
+1. ❌ Putting the SAME value in all three fields (e.g., all = 8.0)
+2. ❌ Extracting year numbers as counts (2024 as enrollment count)
+3. ❌ Extracting counts as percentages (120 as percentage)
+4. ❌ Extracting percentages as counts (8% as enrollment count)
+
+====================================================================================
+✅ CORRECT EXAMPLE FROM A TABLE:
+====================================================================================
+Table shows:
+| School | Last Year | Current Year | % Increase |
+| ABC    | 120       | 144          | 20%        |
+
+CORRECT JSON Response:
+{
+  "answers": ["20%"],
+  "reasonings": ["The table shows clear enrollment data"],
+  "enrollment_2024": 120,     ← Last Year count
+  "enrollment_2025": 144,     ← Current Year count  
+  "enrollment_increase_percentage": 20.0   ← Percentage
+}
+
+====================================================================================
+✅ ANOTHER CORRECT EXAMPLE:
+====================================================================================
+Table shows:
+| District | 2024 | 2025 | Growth |
+| XYZ      | 85   | 96   | -20%   |
+
+CORRECT JSON Response:
+{
+  "answers": ["The enrollment decreased by 20%"],
+  "reasonings": ["Based on the table data"],
+  "enrollment_2024": 85,      ← 2024 count
+  "enrollment_2025": 96,      ← 2025 count
+  "enrollment_increase_percentage": -20.0  ← Negative percentage
+}
+
+====================================================================================
+⚠️ If you cannot find a value clearly, set it to null. Do NOT guess!
+====================================================================================
 """
-            
-            response = model.generate_content([
+
+            response = selected_model.generate_content([
                 {"mime_type": "image/jpeg", "data": base64.b64encode(image.content).decode("utf-8")},
                 prompt,
             ])
@@ -486,19 +745,61 @@ def main(input_file, worker_id=None):
                     task_evidence_qa.append(answers)
                     task_evidence_qa_reason.append(reasonings)
                     relevance_tags.append(calculate_relevance_tag(answers))
-                    
-                    # 🆕 Extract extra keys from row data
+
+                    # 🆕 Extract enrollment data from JSON response or use regex fallback
                     if ENABLE_EXTRA_KEYS:
-                        text_to_analyze = {
-                            'Task Evidence': row.get('Task Evidence', ''),
-                            'Task Remarks': row.get('Task Remarks', ''),
-                            'Sub-Tasks': row.get('Sub-Tasks', ''),
-                            'Answers': ' '.join(str(a) for a in answers),
-                            'Reasonings': ' '.join(str(r) for r in reasonings)
-                        }
-                        extracted = extract_extra_keys(text_to_analyze, task_name_raw)
-                        for key in EXTRA_KEYS.keys():
-                            extra_keys_data[key].append(extracted.get(key))
+                        # Normalize both task names for comparison (remove trailing quotes, periods, spaces)
+                        task_name_normalized = task_name_raw.strip().rstrip("'.\"").strip()
+                        enrollment_filter_normalized = ENROLLMENT_TASK_FILTER.strip().rstrip("'.\"").strip()
+                        
+                        # Debug logging for enrollment task matching
+                        if "enrolment" in task_name_normalized.lower():
+                            logging.info(f"[Enrollment] Checking task: '{task_name_normalized}'")
+                            logging.info(f"[Enrollment] Expected filter: '{enrollment_filter_normalized}'")
+                            logging.info(f"[Enrollment] Match: {task_name_normalized == enrollment_filter_normalized}")
+                        
+                        # Check if this is an enrollment task response with enrollment fields
+                        # Check if this is an enrollment task (regardless of whether API returned enrollment keys)
+                        is_enrollment_task = (task_name_normalized == enrollment_filter_normalized)
+                        
+                        # Check if API actually returned enrollment data
+                        has_enrollment_data = 'enrollment_2024' in response or 'enrollment_2025' in response or 'enrollment_increase_percentage' in response
+
+                        if is_enrollment_task:
+                            # Log raw API response for debugging
+                            logging.info(f"[Enrollment] Task matched! API returned enrollment data: {has_enrollment_data}")
+                            logging.info(f"[Enrollment] Raw API response: enrollment_2024={response.get('enrollment_2024')}, enrollment_2025={response.get('enrollment_2025')}, percentage={response.get('enrollment_increase_percentage')}")
+                            
+                            # Extract directly from JSON response
+                            raw_2024 = response.get('enrollment_2024')
+                            raw_2025 = response.get('enrollment_2025')
+                            raw_pct = response.get('enrollment_increase_percentage')
+                            
+                            # Validate and fix enrollment data
+                            answers_text = ' '.join(str(a) for a in answers)
+                            reasonings_text = ' '.join(str(r) for r in reasonings)
+                            
+                            validated_2024, validated_2025, validated_pct = validate_and_fix_enrollment_data(
+                                raw_2024, raw_2025, raw_pct, answers_text, reasonings_text
+                            )
+                            
+                            extra_keys_data['Enrollment_2024'].append(validated_2024)
+                            extra_keys_data['Enrollment_2025'].append(validated_2025)
+                            extra_keys_data['Enrollment_Increase_Percentage'].append(validated_pct)
+                            
+                            logging.info(f"[Worker {worker_id}] Enrollment data (validated): 2024={validated_2024}, 2025={validated_2025}, %={validated_pct}")
+                        else:
+                            # Fallback to regex extraction for non-enrollment tasks or older responses
+                            text_to_analyze = {
+                                'Task Evidence': row.get('Task Evidence', ''),
+                                'Task Remarks': row.get('Task Remarks', ''),
+                                'Sub-Tasks': row.get('Sub-Tasks', ''),
+                                'Answers': ' '.join(str(a) for a in answers),
+                                'Reasonings': ' '.join(str(r) for r in reasonings)
+                            }
+                            extracted = extract_extra_keys(text_to_analyze, task_name_normalized)
+                            for key in EXTRA_KEYS.keys():
+                                extra_keys_data[key].append(extracted.get(key))
                     else:
                         for key in EXTRA_KEYS.keys():
                             extra_keys_data[key].append(None)
