@@ -771,8 +771,10 @@
                     <canvas id="customTasksDistrictChart"></canvas>
                 </div>
 
-                <!-- Detailed Custom Tasks Table -->
-                <h3 style="font-size: 1.5em; margin: 30px 0 20px 0; color: #4a5568;">Detailed Custom Tasks Breakdown</h3>
+                <!-- Hierarchical Custom Tasks Breakdown -->
+                <h3 style="font-size: 1.5em; margin: 30px 0 20px 0; color: #4a5568;">
+                    📊 District-wise Custom Tasks Breakdown
+                </h3>
                 <div class="table-responsive" id="customTasksTable"></div>
             </div>
 
@@ -1863,41 +1865,139 @@
             }
         });
 
-        // Detailed Table
+        // Build hierarchical structure matching District-wise Submission Quality style
+        const hierarchicalTasks = {};
+
+        customTaskStats.detailedTasks.forEach(item => {
+            const dist = item.district || "Unknown";
+            const blk = item.block || "Unknown";
+            const school = item.school || "Unknown";
+            const task = item.task || "Unknown Task";
+
+            if (!hierarchicalTasks[dist]) {
+                hierarchicalTasks[dist] = {
+                    total: 0,
+                    uniqueTasks: new Set(),
+                    blocks: {}
+                };
+            }
+
+            if (!hierarchicalTasks[dist].blocks[blk]) {
+                hierarchicalTasks[dist].blocks[blk] = {
+                    total: 0,
+                    uniqueTasks: new Set(),
+                    schools: {}
+                };
+            }
+
+            if (!hierarchicalTasks[dist].blocks[blk].schools[school]) {
+                hierarchicalTasks[dist].blocks[blk].schools[school] = {
+                    total: 0,
+                    tasks: {}
+                };
+            }
+
+            if (!hierarchicalTasks[dist].blocks[blk].schools[school].tasks[task]) {
+                hierarchicalTasks[dist].blocks[blk].schools[school].tasks[task] = {
+                    count: 0,
+                    users: new Set(),
+                    userTypes: new Set()
+                };
+            }
+
+            hierarchicalTasks[dist].total++;
+            hierarchicalTasks[dist].uniqueTasks.add(task);
+            hierarchicalTasks[dist].blocks[blk].total++;
+            hierarchicalTasks[dist].blocks[blk].uniqueTasks.add(task);
+            hierarchicalTasks[dist].blocks[blk].schools[school].total++;
+            hierarchicalTasks[dist].blocks[blk].schools[school].tasks[task].count++;
+            hierarchicalTasks[dist].blocks[blk].schools[school].tasks[task].users.add(item.user);
+            hierarchicalTasks[dist].blocks[blk].schools[school].tasks[task].userTypes.add(item.userType);
+        });
+
+        // Generate table HTML matching District-wise style
         let tableHtml = `
             <table>
                 <thead>
                     <tr>
-                        <th>Custom Task Name</th>
-                        <th>Total Count</th>
-                        <th>Unique Users</th>
-                        <th>Unique Schools</th>
-                        <th>Districts</th>
+                        <th style="text-align: left;">DISTRICT / BLOCK / SCHOOL</th>
+                        <th>TOTAL TASKS</th>
+                        <th>BLOCKS/SCHOOLS</th>
+                        <th>UNIQUE TASK TYPES</th>
+                        <th>CUSTOM TASK DETAILS</th>
                     </tr>
                 </thead>
                 <tbody>
         `;
 
-        const allTasksSorted = Object.entries(customTaskStats.uniqueTaskTypes)
-            .sort((a, b) => b[1].count - a[1].count);
+        const sortedTaskDistricts = Object.keys(hierarchicalTasks).sort();
 
-        allTasksSorted.forEach(([taskName, stats]) => {
+        for (const dist of sortedTaskDistricts) {
+            const distData = hierarchicalTasks[dist];
+            const blockCount = Object.keys(distData.blocks).length;
+            const schoolCount = new Set(
+                Object.values(distData.blocks).flatMap(b => Object.keys(b.schools))
+            ).size;
+
+            // District row
             tableHtml += `
-                <tr>
-                    <td style="text-align: left;"><strong>${taskName}</strong></td>
-                    <td>${stats.count}</td>
-                    <td>${stats.users.size}</td>
-                    <td>${stats.schools.size}</td>
-                    <td>${stats.districts.size}</td>
+                <tr class="district-row" onclick="toggleCustomTaskDistrict('${dist.replace(/'/g, "\\'")}')">
+                    <td class="clickable-cell">
+                        <div class="expandable-name">
+                            <span class="expand-arrow" id="arrow-ct-dist-${dist.replace(/[^a-zA-Z0-9]/g, '_')}"></span>
+                            <strong>${dist}</strong>
+                        </div>
+                    </td>
+                    <td>${distData.total.toLocaleString()}</td>
+                    <td>${blockCount} blocks / ${schoolCount} schools</td>
+                    <td>${distData.uniqueTasks.size}</td>
+                    <td>${Array.from(distData.uniqueTasks).slice(0, 2).join(', ')}${distData.uniqueTasks.size > 2 ? '...' : ''}</td>
                 </tr>
             `;
-        });
 
-        tableHtml += `
-                </tbody>
-            </table>
-        `;
+            // Block rows (initially hidden)
+            const sortedBlocks = Object.keys(distData.blocks).sort();
+            for (const blk of sortedBlocks) {
+                const blockData = distData.blocks[blk];
+                const blockSchoolCount = Object.keys(blockData.schools).length;
 
+                tableHtml += `
+                    <tr class="block-row hidden-row ct-district-${dist.replace(/[^a-zA-Z0-9]/g, '_')}" onclick="toggleCustomTaskBlock(event, '${dist.replace(/'/g, "\\'")}', '${blk.replace(/'/g, "\\'")}')">
+                        <td class="clickable-cell indent-1">
+                            <div class="expandable-name">
+                                <span class="expand-arrow" id="arrow-ct-block-${dist.replace(/[^a-zA-Z0-9]/g, '_')}-${blk.replace(/[^a-zA-Z0-9]/g, '_')}"></span>
+                                <strong>${blk}</strong>
+                            </div>
+                        </td>
+                        <td>${blockData.total.toLocaleString()}</td>
+                        <td>${blockSchoolCount} schools</td>
+                        <td>${blockData.uniqueTasks.size}</td>
+                        <td>${Array.from(blockData.uniqueTasks).slice(0, 2).join(', ')}${blockData.uniqueTasks.size > 2 ? '...' : ''}</td>
+                    </tr>
+                `;
+
+                // School rows (initially hidden)
+                const sortedSchools = Object.keys(blockData.schools).sort();
+                for (const school of sortedSchools) {
+                    const schoolData = blockData.schools[school];
+                    const taskList = Object.entries(schoolData.tasks)
+                        .map(([task, data]) => `${task} (${data.count}×)`)
+                        .join(', ');
+
+                    tableHtml += `
+                        <tr class="school-row hidden-row ct-block-${dist.replace(/[^a-zA-Z0-9]/g, '_')}-${blk.replace(/[^a-zA-Z0-9]/g, '_')}">
+                            <td class="indent-2">${school}</td>
+                            <td>${schoolData.total.toLocaleString()}</td>
+                            <td>-</td>
+                            <td>${Object.keys(schoolData.tasks).length}</td>
+                            <td style="text-align: left; font-size: 0.9em;">${taskList}</td>
+                        </tr>
+                    `;
+                }
+            }
+        }
+
+        tableHtml += "</tbody></table>";
         document.getElementById('customTasksTable').innerHTML = tableHtml;
 
         // Export functionality - store data for download
@@ -2577,7 +2677,75 @@
             });
         }
     }
-    
+
+    // Custom Tasks toggle functions
+    function toggleCustomTaskDistrict(districtName) {
+        const districtId = districtName.replace(/[^a-zA-Z0-9]/g, '_');
+        const blockRows = document.querySelectorAll(`.ct-district-${districtId}`);
+        const arrow = document.getElementById(`arrow-ct-dist-${districtId}`);
+        const districtRow = arrow.closest('tr');
+
+        const isExpanded = !arrow.classList.contains('rotated');
+
+        if (isExpanded) {
+            // Expand
+            arrow.classList.add('rotated');
+            districtRow.classList.add('expanded');
+            blockRows.forEach(row => {
+                row.classList.remove('hidden-row');
+            });
+        } else {
+            // Collapse
+            arrow.classList.remove('rotated');
+            districtRow.classList.remove('expanded');
+            blockRows.forEach(row => {
+                row.classList.add('hidden-row');
+                // Also collapse any expanded blocks
+                const blockArrow = row.querySelector('.expand-arrow');
+                if (blockArrow && blockArrow.classList.contains('rotated')) {
+                    blockArrow.classList.remove('rotated');
+                    row.classList.remove('expanded');
+                }
+            });
+
+            // Hide all schools under this district
+            const allSchoolRows = document.querySelectorAll(`[class*="ct-block-${districtId}-"]`);
+            allSchoolRows.forEach(row => {
+                if (row.classList.contains('school-row')) {
+                    row.classList.add('hidden-row');
+                }
+            });
+        }
+    }
+
+    function toggleCustomTaskBlock(event, districtName, blockName) {
+        event.stopPropagation(); // Prevent district toggle
+
+        const districtId = districtName.replace(/[^a-zA-Z0-9]/g, '_');
+        const blockId = blockName.replace(/[^a-zA-Z0-9]/g, '_');
+        const schoolRows = document.querySelectorAll(`.ct-block-${districtId}-${blockId}`);
+        const arrow = document.getElementById(`arrow-ct-block-${districtId}-${blockId}`);
+        const blockRow = arrow.closest('tr');
+
+        const isExpanded = !arrow.classList.contains('rotated');
+
+        if (isExpanded) {
+            // Expand
+            arrow.classList.add('rotated');
+            blockRow.classList.add('expanded');
+            schoolRows.forEach(row => {
+                row.classList.remove('hidden-row');
+            });
+        } else {
+            // Collapse
+            arrow.classList.remove('rotated');
+            blockRow.classList.remove('expanded');
+            schoolRows.forEach(row => {
+                row.classList.add('hidden-row');
+            });
+        }
+    }
+
     // Event Listeners
     document.getElementById('csvFile').addEventListener('change', function(e) {
         const fileName = e.target.files[0]?.name || 'Choose CSV File';
