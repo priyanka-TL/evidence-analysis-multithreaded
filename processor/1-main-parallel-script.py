@@ -705,10 +705,14 @@ def main(input_file, worker_id=None):
         questions_map = load_questions_mapping(questions_file)
 
         df = pd.read_excel(input_file) if input_file.endswith(".xlsx") else pd.read_csv(input_file)
+
+        # Filter: Keep rows with Task Evidence, but allow Null Task Evidence Question for user-owned tasks
         df_filtered = df[
             ~df["Task Evidence"].isin([None, "Null"])
-            & ~df["Task Evidence Question"].isin([None, "Null"])
-        ].dropna(subset=["Task Evidence", "Task Evidence Question"])
+        ].dropna(subset=["Task Evidence"])
+
+        # Don't filter out rows with Null Task Evidence Question - they might be user-owned tasks
+        logging.info(f"[Worker {worker_id}] Total rows after filtering: {len(df_filtered)}")
 
         processed_count = 0
         task_evidence_qa = []
@@ -721,19 +725,25 @@ def main(input_file, worker_id=None):
 
         for idx, row in df_filtered.iterrows():
             task_evidence = str(row["Task Evidence"]).strip()
-            task_question = str(row["Task Evidence Question"]).strip()
+            task_question_raw = row.get("Task Evidence Question", "")
+            task_question = str(task_question_raw).strip() if pd.notna(task_question_raw) and task_question_raw != "Null" else ""
             task_name_raw = str(row.get("Tasks", "")).strip()
-            
+
             # Normalize task name for matching (remove trailing quotes, periods, etc.)
             task_name = task_name_raw.rstrip("'.").strip()
-            
+
             # Check if task is user-owned (not in questions mapping)
             # Try exact match first, then normalized match
             is_user_owned = (task_name_raw not in questions_map and task_name not in questions_map)
-            
+
+            # For user-owned tasks, use a generic question if no question is provided
+            if is_user_owned and not task_question:
+                task_question = f"Describe the evidence provided for the task: {task_name}"
+                logging.info(f"[Worker {worker_id}] USER-OWNED task '{task_name}' - using generic question")
+
             if idx == 0 or idx % 10 == 0:  # Log every 10th row for debugging
                 logging.debug(f"[Worker {worker_id}] Task name: '{task_name_raw}' -> normalized: '{task_name}' -> {'USER-OWNED' if is_user_owned else 'STANDARD'}")
-            
+
             task_types.append("User-Owned" if is_user_owned else "Standard")
 
             if any(task_evidence.lower().endswith(ext) for ext in IMAGE_FORMATS):

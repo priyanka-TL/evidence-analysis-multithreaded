@@ -583,7 +583,7 @@
             </div>
             <div class="file-input-wrapper">
                 <input type="file" id="geojsonFile" accept=".geojson,.json">
-                <label for="geojsonFile" class="file-input-label">🗺️ Choose GeoJSON File (Optional)</label>
+                <label for="geojsonFile" class="file-input-label">🗺️ GeoJSON (Optional)</label>
             </div>
             <button class="btn-process" onclick="processCSV()">🔄 Process Data</button>
             <button class="btn-download" onclick="downloadPDF()" id="downloadBtn" disabled>📄 Download PDF</button>
@@ -748,6 +748,34 @@
                 <h3 style="font-size: 1.5em; margin: 30px 0 20px 0; color: #4a5568;">District / Block / School Enrollment Details</h3>
                 <div class="table-responsive" id="enrollmentTable"></div>
             </div>
+
+            <!-- USER-OWNED TASKS SECTION (State-specific: Haryana) -->
+            <div class="report-section hidden" id="userOwnedTasksSection">
+                <h2 class="section-title">👤 User-Owned Custom Tasks Analysis</h2>
+                <p style="text-align: center; color: #718096; margin-bottom: 20px;">
+                    Tasks created by users that are not part of the standard question sheet
+                </p>
+
+                <!-- Custom Tasks Summary Cards -->
+                <div class="grid grid-4" id="customTasksSummary"></div>
+
+                <!-- Custom Tasks Distribution Chart -->
+                <div class="chart-container">
+                    <div class="chart-title">Top 10 Most Common User-Owned Tasks</div>
+                    <canvas id="customTasksChart"></canvas>
+                </div>
+
+                <!-- User Activity Chart -->
+                <div class="chart-container">
+                    <div class="chart-title">User Engagement: Custom Task Creation by District</div>
+                    <canvas id="customTasksDistrictChart"></canvas>
+                </div>
+
+                <!-- Detailed Custom Tasks Table -->
+                <h3 style="font-size: 1.5em; margin: 30px 0 20px 0; color: #4a5568;">Detailed Custom Tasks Breakdown</h3>
+                <div class="table-responsive" id="customTasksTable"></div>
+            </div>
+
         </div>
     </div>
 </div>
@@ -763,6 +791,12 @@
         school: '',
         relevance: ''
     };
+
+    // Check if a task is user-owned (custom) based on Task Type column
+    function isUserOwnedTask(row) {
+        const taskType = row["Task Type"];
+        return taskType && taskType !== "Standard";
+    }
 
     // Utility functions (unchanged)
     function getTimelineSettings(minDate, maxDate) {
@@ -812,11 +846,15 @@
         document.getElementById('report').classList.add('hidden');
         document.getElementById('filterSection').classList.remove('active');
 
-        // Clear enrollment section to remove stale data
+        // Clear enrollment and custom tasks sections to remove stale data
         document.getElementById('enrollmentSection').classList.add('hidden');
         document.getElementById('enrollmentSummary').innerHTML = '';
         document.getElementById('enrollmentTable').innerHTML = '';
+        document.getElementById('userOwnedTasksSection').classList.add('hidden');
+        document.getElementById('customTasksSummary').innerHTML = '';
+        document.getElementById('customTasksTable').innerHTML = '';
         
+        // Parse the CSV (no need for questions file - using Task Type column from CSV)
         Papa.parse(file, {
             header: true,
             skipEmptyLines: true,
@@ -1209,7 +1247,9 @@
 
         // Charts
         const labels = Array.from(new Set([...Object.keys(monthlyStart), ...Object.keys(monthlyCompletion)])).sort();
-        if(window.projectTimelineChart) window.projectTimelineChart.destroy();
+        if (window.projectTimelineChart && typeof window.projectTimelineChart.destroy === 'function') {
+            window.projectTimelineChart.destroy();
+        }
         window.projectTimelineChart = new Chart(document.getElementById('monthlyLine'), { 
             type: 'line', 
             data: { 
@@ -1245,7 +1285,9 @@
         });
 
         const subLabels = Array.from(new Set([...Object.keys(submissionVolume), ...Object.keys(relevantVolume)])).sort();
-        if(window.submissionVolumeChart) window.submissionVolumeChart.destroy();
+        if (window.submissionVolumeChart && typeof window.submissionVolumeChart.destroy === 'function') {
+            window.submissionVolumeChart.destroy();
+        }
         window.submissionVolumeChart = new Chart(document.getElementById('submissionVolumeLine'), { 
             type: 'line', 
             data: { 
@@ -1288,8 +1330,10 @@
 
         if (shouldShowSubjectGradeCharts) {
             document.getElementById('subjectGradePieCharts').style.display = 'block';
-            
-            if(window.subjectPieChart) window.subjectPieChart.destroy();
+
+            if (window.subjectPieChart && typeof window.subjectPieChart.destroy === 'function') {
+                window.subjectPieChart.destroy();
+            }
             window.subjectPieChart = new Chart(document.getElementById('subjectPie'), { 
                 type: 'doughnut', 
                 data: { 
@@ -1318,7 +1362,9 @@
                 } 
             });
 
-            if(window.gradePieChart) window.gradePieChart.destroy();
+            if (window.gradePieChart && typeof window.gradePieChart.destroy === 'function') {
+                window.gradePieChart.destroy();
+            }
             window.gradePieChart = new Chart(document.getElementById('gradePie'), { 
                 type: 'doughnut', 
                 data: { 
@@ -1430,7 +1476,9 @@
         }
 
         // Task Completion Chart
-        if(window.taskCompletionChart) window.taskCompletionChart.destroy();
+        if (window.taskCompletionChart && typeof window.taskCompletionChart.destroy === 'function') {
+            window.taskCompletionChart.destroy();
+        }
         window.taskCompletionChart = new Chart(document.getElementById('taskCompletionBar'), { 
             type: 'bar', 
             data: { 
@@ -1628,7 +1676,236 @@
                 'insufficient enrollment data');
             document.getElementById('enrollmentSection').classList.add('hidden');
         }
+
+        // NEW: Custom Tasks Analysis (State-specific: Haryana)
+        const customTaskStates = ["HARYANA"];
+        const shouldShowCustomTasks = Array.from(statesInDataUpper).some(state => 
+            customTaskStates.includes(state)
+        );
+
+        console.log('Custom tasks check:', {
+            statesInData: Array.from(statesInData),
+            shouldShowCustomTasks
+        });
+
+        if (shouldShowCustomTasks) {
+            generateCustomTasksAnalysis(data);
+        } else {
+            console.log('Hiding custom tasks section - state does not require custom task tracking');
+            document.getElementById('userOwnedTasksSection').classList.add('hidden');
+        }
     }
+
+    // NEW: Custom Tasks Analysis Generation
+    function generateCustomTasksAnalysis(data) {
+        const customTaskStats = {
+            totalCustomTasks: 0,
+            uniqueTaskTypes: {},
+            userCounts: {},
+            districtCounts: {},
+            blockCounts: {},
+            schoolCounts: {},
+            detailedTasks: []
+        };
+
+        data.forEach(row => {
+            // Check if this is a user-owned task using Task Type column
+            if (isUserOwnedTask(row)) {
+                customTaskStats.totalCustomTasks++;
+                
+                const taskName = row["Tasks"] || "Unknown Task";
+                const originalTask = String(taskName).trim();
+                
+                // Count by task type
+                if (!customTaskStats.uniqueTaskTypes[originalTask]) {
+                    customTaskStats.uniqueTaskTypes[originalTask] = {
+                        count: 0,
+                        users: new Set(),
+                        schools: new Set(),
+                        districts: new Set()
+                    };
+                }
+                customTaskStats.uniqueTaskTypes[originalTask].count++;
+                customTaskStats.uniqueTaskTypes[originalTask].users.add(row["UUID"]);
+                customTaskStats.uniqueTaskTypes[originalTask].schools.add(row["School Name"]);
+                customTaskStats.uniqueTaskTypes[originalTask].districts.add(row["District"]);
+                
+                // Count by district
+                const district = row["District"] || "Unknown";
+                customTaskStats.districtCounts[district] = (customTaskStats.districtCounts[district] || 0) + 1;
+                
+                // Count by block
+                const block = row["Block"] || "Unknown";
+                const blockKey = `${district} - ${block}`;
+                customTaskStats.blockCounts[blockKey] = (customTaskStats.blockCounts[blockKey] || 0) + 1;
+                
+                // Count by school
+                const school = row["School Name"] || "Unknown";
+                const schoolKey = `${district} - ${block} - ${school}`;
+                customTaskStats.schoolCounts[schoolKey] = (customTaskStats.schoolCounts[schoolKey] || 0) + 1;
+                
+                // Count by user
+                const userId = row["UUID"];
+                customTaskStats.userCounts[userId] = (customTaskStats.userCounts[userId] || 0) + 1;
+                
+                // Store detailed record
+                customTaskStats.detailedTasks.push({
+                    task: originalTask,
+                    district: district,
+                    block: block,
+                    school: school,
+                    user: userId,
+                    userType: row["User sub type"] || "Unknown",
+                    evidence: row["Task Evidence"] || "No evidence",
+                    remarks: row["Task Remarks"] || "No remarks"
+                });
+            }
+        });
+
+        if (customTaskStats.totalCustomTasks === 0) {
+            console.log('No custom tasks found in data');
+            document.getElementById('userOwnedTasksSection').classList.add('hidden');
+            return;
+        }
+
+        // Show custom tasks section
+        document.getElementById('userOwnedTasksSection').classList.remove('hidden');
+
+        const uniqueUsers = Object.keys(customTaskStats.userCounts).length;
+        const uniqueDistricts = Object.keys(customTaskStats.districtCounts).length;
+        const uniqueTaskTypes = Object.keys(customTaskStats.uniqueTaskTypes).length;
+        const avgTasksPerUser = uniqueUsers > 0 ? (customTaskStats.totalCustomTasks / uniqueUsers).toFixed(2) : 0;
+
+        // Summary Cards
+        document.getElementById('customTasksSummary').innerHTML = `
+            <div class="card">
+                <div class="metric-label">Total Custom Tasks</div>
+                <div class="big-number">${customTaskStats.totalCustomTasks.toLocaleString()}</div>
+            </div>
+            <div class="card">
+                <div class="metric-label">Unique Task Types</div>
+                <div class="big-number">${uniqueTaskTypes}</div>
+            </div>
+            <div class="card">
+                <div class="metric-label">Active Users</div>
+                <div class="big-number">${uniqueUsers}</div>
+            </div>
+            <div class="card">
+                <div class="metric-label">Avg Tasks/User</div>
+                <div class="big-number">${avgTasksPerUser}</div>
+            </div>
+        `;
+
+        // Top 10 Custom Tasks Chart
+        const sortedTasks = Object.entries(customTaskStats.uniqueTaskTypes)
+            .sort((a, b) => b[1].count - a[1].count)
+            .slice(0, 10);
+
+        if (window.customTasksChart && typeof window.customTasksChart.destroy === 'function') {
+            window.customTasksChart.destroy();
+        }
+        window.customTasksChart = new Chart(document.getElementById('customTasksChart'), {
+            type: 'bar',
+            data: {
+                labels: sortedTasks.map(([task]) => task.substring(0, 40) + (task.length > 40 ? '...' : '')),
+                datasets: [{
+                    label: 'Occurrences',
+                    data: sortedTasks.map(([_, stats]) => stats.count),
+                    backgroundColor: 'rgba(79, 172, 254, 0.8)',
+                    borderColor: 'rgba(79, 172, 254, 1)',
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                animation: false,
+                responsive: true,
+                indexAxis: 'y',
+                plugins: {
+                    legend: { display: false }
+                },
+                scales: {
+                    x: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.1)' } },
+                    y: { grid: { color: 'rgba(0,0,0,0.1)' } }
+                }
+            }
+        });
+
+        // District Distribution Chart
+        const sortedDistricts = Object.entries(customTaskStats.districtCounts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10);
+
+        if (window.customTasksDistrictChart && typeof window.customTasksDistrictChart.destroy === 'function') {
+            window.customTasksDistrictChart.destroy();
+        }
+        window.customTasksDistrictChart = new Chart(document.getElementById('customTasksDistrictChart'), {
+            type: 'bar',
+            data: {
+                labels: sortedDistricts.map(([district]) => district),
+                datasets: [{
+                    label: 'Custom Tasks',
+                    data: sortedDistricts.map(([_, count]) => count),
+                    backgroundColor: 'rgba(66, 230, 149, 0.8)',
+                    borderColor: 'rgba(66, 230, 149, 1)',
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                animation: false,
+                responsive: true,
+                plugins: {
+                    legend: { display: false }
+                },
+                scales: {
+                    y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.1)' } },
+                    x: { grid: { color: 'rgba(0,0,0,0.1)' } }
+                }
+            }
+        });
+
+        // Detailed Table
+        let tableHtml = `
+            <table>
+                <thead>
+                    <tr>
+                        <th>Custom Task Name</th>
+                        <th>Total Count</th>
+                        <th>Unique Users</th>
+                        <th>Unique Schools</th>
+                        <th>Districts</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        const allTasksSorted = Object.entries(customTaskStats.uniqueTaskTypes)
+            .sort((a, b) => b[1].count - a[1].count);
+
+        allTasksSorted.forEach(([taskName, stats]) => {
+            tableHtml += `
+                <tr>
+                    <td style="text-align: left;"><strong>${taskName}</strong></td>
+                    <td>${stats.count}</td>
+                    <td>${stats.users.size}</td>
+                    <td>${stats.schools.size}</td>
+                    <td>${stats.districts.size}</td>
+                </tr>
+            `;
+        });
+
+        tableHtml += `
+                </tbody>
+            </table>
+        `;
+
+        document.getElementById('customTasksTable').innerHTML = tableHtml;
+
+        // Export functionality - store data for download
+        window.customTasksData = customTaskStats.detailedTasks;
+    }
+
+    // Function to export custom tasks to CSV
+    // Export custom tasks function removed - use processor/6-user-owned-tasks-analyzer.py instead
 
     // NEW: Enrollment Analytics Generation
     function generateEnrollmentAnalytics(enrollmentStats) {
