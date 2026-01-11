@@ -179,25 +179,31 @@ def calculate_stats(hierarchy_dict):
             # Calculate for children first
             if data['_children']:
                 calculate_stats(data['_children'])
-            
-            # Calculate average enrollment
-            enrollment_nums = data.get('_enrollment_numbers', [])
-            if enrollment_nums:
-                data['_avg_enrollment'] = np.mean(enrollment_nums)
-                data['_total_enrollment'] = sum(enrollment_nums)
-                data['_min_enrollment'] = min(enrollment_nums)
-                data['_max_enrollment'] = max(enrollment_nums)
-                data['_enrollment_count'] = len(enrollment_nums)
+
+            # Calculate average enrollment from ACTUAL enrollment columns (Enrollment_2024, Enrollment_2025)
+            # NOT from text extraction which can include irrelevant numbers
+            enrollment_2024_values = [v for v in data.get('_extra_keys', {}).get('Enrollment_2024', []) if not pd.isna(v)]
+            enrollment_2025_values = [v for v in data.get('_extra_keys', {}).get('Enrollment_2025', []) if not pd.isna(v)]
+
+            # Combine both years for average calculation
+            all_enrollment_values = enrollment_2024_values + enrollment_2025_values
+
+            if all_enrollment_values:
+                data['_avg_enrollment'] = np.mean(all_enrollment_values)
+                data['_total_enrollment'] = sum(all_enrollment_values)
+                data['_min_enrollment'] = min(all_enrollment_values)
+                data['_max_enrollment'] = max(all_enrollment_values)
+                data['_enrollment_count'] = len(all_enrollment_values)
             else:
                 data['_avg_enrollment'] = 0
                 data['_total_enrollment'] = 0
                 data['_min_enrollment'] = 0
                 data['_max_enrollment'] = 0
                 data['_enrollment_count'] = 0
-            
+
             # Count unique schools
             data['_school_count'] = len(data.get('_schools', set()))
-            
+
             # 🆕 Aggregate extra keys - REMOVED: No longer adding _avg, _sum, _count columns
             # The original enrollment columns are already in the data
 
