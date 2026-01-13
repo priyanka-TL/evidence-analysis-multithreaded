@@ -9,12 +9,12 @@ from tqdm import tqdm  # Import tqdm for the progress bar
 INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/sample_haryana_custom_task.csv"
 QUESTION_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/questions.csv"
 FILTER_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/school_list.csv"
-USE_SCHOOL_FILTER = False  # Set to True to filter by school_list.csv, False to skip this filter
+USE_SCHOOL_FILTER = os.getenv("USE_SCHOOL_FILTER", False)  # Set to True to filter by school_list.csv, False to skip this filter
 OUTPUT_DIR = "output-pre-processor"
 
 # === SPLIT CONFIGURATION ===
-SPLIT_FILES = "yes"  # Set to "yes" to split into multiple files, "no" for single file
-ROWS_PER_FILE = 10000  # Only used if SPLIT_FILES = "yes"
+SPLIT_FILES = os.getenv("SPLIT_FILES", "yes")  # Set to "yes" to split into multiple files, "no" for single file
+ROWS_PER_FILE = os.getenv("ROWS_PER_FILE", 10000)  # Only used if SPLIT_FILES = "yes"
 
 # === IMAGE FORMATS ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
@@ -138,9 +138,9 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
         continue
 
     # Rule 1: Skip if task starts with 1 or 8
-    if task.startswith("1") or task.startswith("8"):
-        skip_task_start += 1
-        continue
+    # if task.startswith("1") or task.startswith("8"):
+    #     skip_task_start += 1
+    #     continue
 
     # Rule 2: Skip if evidence is empty or "null" (after cleaning for check)
     cleaned_evidence = clean_cell(evidence)
