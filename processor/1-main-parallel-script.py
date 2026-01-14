@@ -14,6 +14,7 @@ from urllib.request import urlopen
 import re
 import logging
 import csv
+import io  # For BytesIO when processing Excel files from URLs
 from dotenv import load_dotenv
 load_dotenv()
 import threading
@@ -22,6 +23,9 @@ from collections import deque
 
 # === Constants ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+PDF_FORMATS = {".pdf"}
+EXCEL_FORMATS = {".xlsx", ".xls"}
+ALL_VALID_FORMATS = IMAGE_FORMATS | PDF_FORMATS | EXCEL_FORMATS
 MAX_PROCESSED_ROWS = 520
 INPUT_DIR = "../pre-processor/parallel_input_split_1_files"
 OUTPUT_DIR = "../pre-processor/parallel_output_split_1_files"
@@ -691,6 +695,193 @@ CORRECT JSON Response:
     return {"error": "Max retries reached"}
 
 
+# === Helper function to determine evidence type ===
+def get_evidence_type(url):
+    """Determine evidence type from URL. Returns: 'image', 'pdf', 'excel', or None"""
+    url = str(url).strip().lower()
+    for ext in IMAGE_FORMATS:
+        if url.endswith(ext):
+            return "image"
+    for ext in PDF_FORMATS:
+        if url.endswith(ext):
+            return "pdf"
+    for ext in EXCEL_FORMATS:
+        if url.endswith(ext):
+            return "excel"
+    return None
+
+
+# === Enrollment prompt suffix (shared between image/pdf/excel processors) ===
+ENROLLMENT_PROMPT_SUFFIX = """
+
+====================================================================================
+⚠️ CRITICAL: ENROLLMENT DATA EXTRACTION FROM REPORT ⚠️
+====================================================================================
+
+You are analyzing an ENROLLMENT REPORT. You MUST extract THREE DIFFERENT numerical values:
+
+📊 VALUE 1: enrollment_2024 (INTEGER - Student Count)
+   WHERE TO FIND: Look for labels like:
+   - "Total enrolment number from last year"
+   - "Last Year Enrolment" 
+   - "Previous Year"
+   - Near the year "2024"
+   
+   WHAT TO EXTRACT: The STUDENT COUNT (typically 10-9999 range)
+   ❌ DO NOT extract: The year "2024" itself
+   ❌ DO NOT extract: Percentages
+   
+📊 VALUE 2: enrollment_2025 (INTEGER - Student Count)  
+   WHERE TO FIND: Look for labels like:
+   - "Total enrolment number from current year"
+   - "Current Year Enrolment"
+   - "This Year"
+   - Near the year "2025"
+   
+   WHAT TO EXTRACT: The STUDENT COUNT (typically 10-9999 range)
+   ❌ DO NOT extract: The year "2025" itself
+   ❌ DO NOT extract: Percentages
+
+📊 VALUE 3: enrollment_increase_percentage (FLOAT - Percentage Value)
+   WHERE TO FIND: Look for labels like:
+   - "% increase"
+   - "Percentage increase" 
+   - "Growth %"
+   - Usually has a "%" symbol
+   
+   WHAT TO EXTRACT: The PERCENTAGE number (can be negative)
+
+====================================================================================
+⚠️ If you cannot find a value clearly, set it to null. Do NOT guess!
+====================================================================================
+"""
+
+
+def process_pdf(task_evidence_link, task_evidence_question, task_name=None, max_retries=3):
+    """Process PDF evidence using Gemini API"""
+    global current_token_index
+    retries = 0
+    while retries < max_retries:
+        try:
+            rate_limiter()
+            # Download PDF
+            pdf_response = httpx.get(task_evidence_link)
+            pdf_data = pdf_response.content
+            
+            # Check if this is an enrollment-related task
+            task_name_normalized_check = (task_name.strip().rstrip("'\".").strip() if task_name else "")
+            filter_normalized_check = ENROLLMENT_TASK_FILTER.strip().rstrip("'\".").strip()
+            is_enrollment_task = (task_name_normalized_check == filter_normalized_check)
+            
+            if is_enrollment_task:
+                logging.info(f"[PDF] Using enrollment_model for task '{task_name_normalized_check}'")
+            
+            prompt = f"""You are an educational evidence validator. Analyze the given PDF document and answer these questions:
+
+{task_evidence_question}
+
+For each question, you can provide either:
+1. A clear YES or NO answer with brief reasoning, OR
+2. A detailed, descriptive answer that thoroughly explains what you observe
+
+Focus on:
+- Content evidence in the document
+- Relevance to the question
+- Quality and clarity of the evidence
+- Educational context and completeness"""
+            
+            selected_model = model
+            if is_enrollment_task:
+                selected_model = enrollment_model
+                prompt += ENROLLMENT_PROMPT_SUFFIX
+            
+            response = selected_model.generate_content([
+                {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")},
+                prompt,
+            ])
+            response_json = json.loads(response.text)
+            return response_json
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+                logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
+                if switch_to_next_token():
+                    continue
+                else:
+                    logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
+                    time.sleep(60)
+                    retries += 1
+            else:
+                logging.error(f"[Gemini] PDF processing error: {e}")
+                retries += 1
+    logging.error("[Gemini] Max retries reached for PDF processing.")
+    return {"error": "Max retries reached"}
+
+
+def process_excel(task_evidence_link, task_evidence_question, task_name=None, max_retries=3):
+    """Process Excel evidence - download and convert to text for Gemini"""
+    global current_token_index
+    retries = 0
+    while retries < max_retries:
+        try:
+            rate_limiter()
+            # Download Excel file
+            excel_response = httpx.get(task_evidence_link)
+            
+            # Read Excel into DataFrame
+            df_excel = pd.read_excel(io.BytesIO(excel_response.content))
+            excel_text = df_excel.to_string()
+            
+            # Check if this is an enrollment-related task
+            task_name_normalized_check = (task_name.strip().rstrip("'\".").strip() if task_name else "")
+            filter_normalized_check = ENROLLMENT_TASK_FILTER.strip().rstrip("'\".").strip()
+            is_enrollment_task = (task_name_normalized_check == filter_normalized_check)
+            
+            if is_enrollment_task:
+                logging.info(f"[Excel] Using enrollment_model for task '{task_name_normalized_check}'")
+            
+            prompt = f"""You are an educational evidence validator. Analyze the following Excel spreadsheet data and answer these questions:
+
+{task_evidence_question}
+
+EXCEL DATA:
+{excel_text[:10000]}
+
+For each question, you can provide either:
+1. A clear YES or NO answer with brief reasoning, OR
+2. A detailed, descriptive answer that thoroughly explains what you observe
+
+Focus on:
+- Data evidence in the spreadsheet
+- Relevance to the question
+- Quality and completeness of the data
+- Educational context"""
+            
+            selected_model = model
+            if is_enrollment_task:
+                selected_model = enrollment_model
+                prompt += ENROLLMENT_PROMPT_SUFFIX
+            
+            response = selected_model.generate_content([prompt])
+            response_json = json.loads(response.text)
+            return response_json
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+                logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
+                if switch_to_next_token():
+                    continue
+                else:
+                    logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
+                    time.sleep(60)
+                    retries += 1
+            else:
+                logging.error(f"[Gemini] Excel processing error: {e}")
+                retries += 1
+    logging.error("[Gemini] Max retries reached for Excel processing.")
+    return {"error": "Max retries reached"}
+
+
 # === Main processing ===
 def main(input_file, worker_id=None):
     try:
@@ -746,9 +937,20 @@ def main(input_file, worker_id=None):
 
             task_types.append("User-Owned" if is_user_owned else "Standard")
 
-            if any(task_evidence.lower().endswith(ext) for ext in IMAGE_FORMATS):
-                logging.info(f"[Worker {worker_id}] Processing {'user-owned' if is_user_owned else 'standard'} task row {idx+1}/{len(df_filtered)}")
-                response = process_image(task_evidence, task_question, task_name_raw)
+            # Determine evidence type and route to appropriate processor
+            evidence_type = get_evidence_type(task_evidence)
+            if evidence_type:
+                logging.info(f"[Worker {worker_id}] Processing {evidence_type} {'user-owned' if is_user_owned else 'standard'} task row {idx+1}/{len(df_filtered)}")
+                
+                # Route to appropriate processor based on evidence type
+                if evidence_type == "image":
+                    response = process_image(task_evidence, task_question, task_name_raw)
+                elif evidence_type == "pdf":
+                    response = process_pdf(task_evidence, task_question, task_name_raw)
+                elif evidence_type == "excel":
+                    response = process_excel(task_evidence, task_question, task_name_raw)
+                else:
+                    response = None
                 if isinstance(response, dict) and "answers" in response and "reasonings" in response:
                     answers = response["answers"]
                     reasonings = response["reasonings"]
@@ -822,11 +1024,11 @@ def main(input_file, worker_id=None):
                     for key in EXTRA_KEYS.keys():
                         extra_keys_data[key].append(None)
             else:
-                logging.info(f"[Worker {worker_id}] Skipping non-image row {idx+1}")
+                logging.info(f"[Worker {worker_id}] Skipping unsupported evidence type at row {idx+1}")
                 task_evidence_qa.append(None)
                 task_evidence_qa_reason.append(None)
                 relevance_tags.append('Irrelevant')
-                task_types.append("Non-Image")
+                task_types.append("Unsupported")
                 for key in EXTRA_KEYS.keys():
                     extra_keys_data[key].append(None)
 
