@@ -20,8 +20,13 @@ import threading
 import time
 from collections import deque
 
+import io
+
 # === Constants ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+PDF_FORMATS = {".pdf"}
+EXCEL_FORMATS = {".xlsx", ".xls"}
+SUPPORTED_EVIDENCE_FORMATS = IMAGE_FORMATS | PDF_FORMATS | EXCEL_FORMATS
 MAX_PROCESSED_ROWS = 520
 INPUT_DIR = "../pre-processor/parallel_input_split_1_files"
 OUTPUT_DIR = "../pre-processor/parallel_output_split_1_files"
@@ -147,7 +152,6 @@ def switch_to_next_token():
 # === Gemini Model Setup ===
 class AnalysisResponse(typing.TypedDict):
     answers: list[str]
-    reasonings: list[str]
 
 class EnrollmentAnalysisResponse(typing.TypedDict):
     answers: list[str]
@@ -179,6 +183,42 @@ enrollment_model = genai.GenerativeModel(
         "response_schema": EnrollmentAnalysisResponse,
     },
 )
+
+# === 🆕 ANSWER EXTRACTION FUNCTION ===
+def extract_yes_no_from_answer(answer_text):
+    """
+    Extract YES/NO from answer text if present at the start.
+    Returns tuple: (clean_answer, full_reasoning)
+    
+    Examples:
+    - "YES. The evidence shows..." → ("YES", "YES. The evidence shows...")
+    - "NO. Cannot find..." → ("NO", "NO. Cannot find...")
+    - "YES, the data..." → ("YES", "YES, the data...")
+    - "NO! Missing..." → ("NO", "NO! Missing...")
+    - "The enrollment is 120" → ("The enrollment is 120", "The enrollment is 120")
+    """
+    if not answer_text or not isinstance(answer_text, str):
+        return (answer_text, answer_text)
+    
+    answer_stripped = answer_text.strip()
+    
+    # Check if answer starts with YES or NO followed by punctuation or whitespace
+    # This pattern handles: period, comma, exclamation, ellipsis, newline, space
+    yes_no_patterns = [
+        r'^(YES|NO)[.,!;:\s]+(.+)$',  # "YES. text" or "NO, text" or "YES! text" etc
+        r'^(YES|NO)\.{2,}',            # "YES..." or "NO..."
+        r'^(YES|NO)\.?$',              # Just "YES" or "NO" or "YES." or "NO."
+    ]
+    
+    for pattern in yes_no_patterns:
+        match = re.match(pattern, answer_stripped, re.IGNORECASE | re.DOTALL)
+        if match:
+            yes_no_part = match.group(1).upper()  # Extract YES or NO
+            # Full reasoning is the original answer
+            return (yes_no_part, answer_stripped)
+    
+    # If no YES/NO found, return as-is
+    return (answer_stripped, answer_stripped)
 
 # === 🆕 Extra Keys Extraction Function ===
 def extract_extra_keys(text_fields, task_name=None):
@@ -403,85 +443,306 @@ def validate_and_fix_enrollment_data(enr_2024, enr_2025, enr_pct, answers_text, 
     return enr_2024, enr_2025, enr_pct
 
 # === Utility functions ===
-def calculate_relevance_tag(answers):
+# ========================================
+# IMPROVED RELEVANCE CALCULATOR
+# ========================================
+
+class RelevanceCalculator:
+    """Enhanced relevance calculator with semantic matching and rejection detection"""
+    
+    STOP_WORDS = {
+        'the', 'is', 'are', 'was', 'were', 'has', 'have', 'had', 'be', 'been', 'being',
+        'check', 'verify', 'look', 'see', 'find', 'tell', 'whether', 'if', 'does',
+        'of', 'in', 'at', 'to', 'for', 'with', 'from', 'by', 'on', 'an', 'a', 'as',
+        'and', 'or', 'but', 'not', 'this', 'that', 'these', 'those', 'there',
+        'do', 'does', 'did', 'will', 'would', 'should', 'could', 'can', 'may', 'might',
+        'what', 'which', 'who', 'where', 'when', 'why', 'how', 'any', 'all', 'each',
+        'every', 'some', 'such', 'only', 'own', 'same', 'so', 'than', 'too', 'very'
+    }
+    
+    REJECTION_PATTERNS = [
+        r'\bunable to (determine|find|locate|identify|verify)',
+        r'\bcannot (determine|find|locate|identify|verify|be determined)',
+        r'\bno (information|data|evidence|details|mention)',
+        r'\bnot (mentioned|found|available|provided|present|visible|shown)',
+        r'\binsufficient (data|information|evidence|details)',
+        r'\bdata (not available|unavailable|missing)',
+        r'\binformation (not available|unavailable|missing)',
+        r'\bevidence (not found|unavailable|missing)',
+        r'\bnot clear(ly)? (visible|shown|stated|mentioned)',
+        r'\bcannot confirm',
+        r'\bunavailable',
+        r'\bnone found',
+        r'\bno clear',
+    ]
+    
+    def __init__(self):
+        self.compiled_rejection_patterns = [re.compile(p, re.IGNORECASE) for p in self.REJECTION_PATTERNS]
+    
+    def extract_keywords(self, text):
+        if not text:
+            return []
+        words = re.findall(r'\b[a-z]{3,}\b', text.lower())
+        return [w for w in words if w not in self.STOP_WORDS]
+    
+    def is_rejection_answer(self, answer):
+        if not answer:
+            return True
+        answer_lower = answer.lower().strip()
+        for pattern in self.compiled_rejection_patterns:
+            if pattern.search(answer_lower):
+                return True
+        return False
+    
+    def detect_answer_type(self, answer):
+        if not answer or not answer.strip():
+            return 'REJECTION'
+        
+        answer_lower = answer.lower().strip()
+        
+        if self.is_rejection_answer(answer):
+            return 'REJECTION'
+        
+        # Check for YES
+        if re.search(r'\byes\b', answer_lower):
+            if not re.search(r'\b(not|no|n\'t)\s+yes', answer_lower):
+                return 'YES'
+        
+        # Check for NO
+        if re.search(r'\bno\b', answer_lower):
+            return 'NO'
+        
+        return 'DESCRIPTIVE'
+    
+    def calculate_keyword_overlap(self, question, answer):
+        if not question or not answer:
+            return 0.0
+        
+        question_keywords = set(self.extract_keywords(question))
+        answer_keywords = set(self.extract_keywords(answer))
+        
+        if not question_keywords:
+            return 0.0
+        
+        common_keywords = question_keywords & answer_keywords
+        overlap_ratio = len(common_keywords) / len(question_keywords)
+        
+        return min(overlap_ratio, 1.0)
+    
+    def calculate_evidence_quality(self, answer):
+        if not answer or not answer.strip():
+            return 0.0
+        
+        answer_text = answer.strip()
+        score = 0.0
+        
+        # Check for years
+        year_matches = re.findall(r'\b20[0-2]\d\b', answer_text)
+        if len(year_matches) >= 2:
+            score += 0.25
+        elif len(year_matches) >= 1:
+            score += 0.15
+        
+        # Check for numbers
+        number_matches = re.findall(r'\b\d{1,4}\b', answer_text)
+        number_matches = [n for n in number_matches if n not in year_matches]
+        if len(number_matches) >= 5:
+            score += 0.25
+        elif len(number_matches) >= 3:
+            score += 0.15
+        elif len(number_matches) >= 1:
+            score += 0.05
+        
+        # Check for named entities
+        named_entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', answer_text)
+        if len(named_entities) >= 3:
+            score += 0.15
+        elif len(named_entities) >= 1:
+            score += 0.08
+        
+        # Answer length
+        word_count = len(answer_text.split())
+        if word_count >= 50:
+            score += 0.20
+        elif word_count >= 20:
+            score += 0.12
+        elif word_count >= 10:
+            score += 0.05
+        
+        # Multiple sentences
+        sentences = re.split(r'[.!?]+', answer_text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        if len(sentences) >= 3:
+            score += 0.15
+        elif len(sentences) >= 2:
+            score += 0.08
+        
+        return min(score, 1.0)
+    
+    def score_single_answer(self, question, answer, question_type='auto'):
+        result = {
+            'is_rejection': False,
+            'keyword_overlap': 0.0,
+            'evidence_quality': 0.0,
+            'final_score': 0.0
+        }
+        
+        if not answer or not answer.strip():
+            result['is_rejection'] = True
+            return result
+        
+        answer_type = self.detect_answer_type(answer)
+        
+        if answer_type == 'REJECTION':
+            result['is_rejection'] = True
+            return result
+        
+        # Auto-detect question type
+        if question_type == 'auto':
+            question_lower = question.lower() if question else ''
+            # Check for percentage/number questions (descriptive)
+            if any(p in question_lower for p in ['what is the percentage', 'calculate percentage', 'how much', 'how many', 'what are', 'list', 'describe', 'explain']):
+                question_type = 'descriptive'
+            # Check for yes/no questions
+            elif any(p in question_lower for p in ['whether', 'if ', 'is there', 'are there', 'does ', 'do ', 'has ', 'have ', 'is the', 'are the']):
+                question_type = 'yes_no'
+            else:
+                question_type = 'descriptive'  # Default to descriptive
+        
+        keyword_overlap = self.calculate_keyword_overlap(question, answer)
+        evidence_quality = self.calculate_evidence_quality(answer)
+        
+        result['keyword_overlap'] = keyword_overlap
+        result['evidence_quality'] = evidence_quality
+        
+        # Scoring logic
+        if question_type == 'yes_no':
+            if answer_type in ['YES', 'NO']:
+                base_score = 0.9
+                if keyword_overlap >= 0.5:
+                    base_score += 0.1
+                result['final_score'] = min(base_score, 1.0)
+            else:
+                if keyword_overlap >= 0.6:
+                    base_score = 0.6 + (keyword_overlap * 0.2)
+                elif keyword_overlap >= 0.3:
+                    base_score = 0.4 + (keyword_overlap * 0.2)
+                else:
+                    base_score = keyword_overlap * 0.3
+                base_score += evidence_quality * 0.2
+                result['final_score'] = min(base_score, 1.0)
+        else:  # descriptive
+            # CRITICAL: If question asks for specific data (percentage, number) 
+            # but answer is just YES/NO, penalize heavily
+            if answer_type in ['YES', 'NO']:
+                # Check if answer provides actual data despite starting with YES/NO
+                word_count = len(answer.split())
+                if word_count <= 5:  # Just "YES" or "NO" with minimal text
+                    base_score = 0.2  # Low score - didn't answer the question
+                else:
+                    # Has additional content, score based on that content
+                    if keyword_overlap >= 0.6:
+                        base_score = 0.4 + (keyword_overlap * 0.2)
+                    elif keyword_overlap >= 0.3:
+                        base_score = 0.3 + (keyword_overlap * 0.1)
+                    else:
+                        base_score = 0.2
+                    base_score += evidence_quality * 0.3
+            else:
+                # Normal descriptive answer scoring
+                if keyword_overlap >= 0.6:
+                    base_score = 0.5 + (keyword_overlap * 0.3)
+                elif keyword_overlap >= 0.4:
+                    base_score = 0.3 + (keyword_overlap * 0.3)
+                elif keyword_overlap >= 0.2:
+                    base_score = 0.1 + (keyword_overlap * 0.3)
+                else:
+                    base_score = 0.0
+                
+                evidence_bonus = evidence_quality * 0.4
+                base_score += evidence_bonus
+            
+            result['final_score'] = min(base_score, 1.0)
+        
+        return result
+    
+    def calculate_task_relevance(self, questions, answers):
+        if not questions or not answers:
+            return {
+                'relevance_tag': 'Irrelevant',
+                'relevance_percentage': 0.0,
+                'total_questions': 0,
+                'answered_questions': 0
+            }
+        
+        if len(questions) != len(answers):
+            min_len = min(len(questions), len(answers))
+            questions = questions[:min_len]
+            answers = answers[:min_len]
+        
+        question_scores = []
+        for question, answer in zip(questions, answers):
+            score_result = self.score_single_answer(question, answer)
+            question_scores.append(score_result)
+        
+        total_questions = len(questions)
+        rejected_questions = sum(1 for s in question_scores if s['is_rejection'])
+        answered_questions = total_questions - rejected_questions
+        
+        non_rejected_scores = [s['final_score'] for s in question_scores if not s['is_rejection']]
+        
+        if non_rejected_scores:
+            average_score = sum(non_rejected_scores) / len(non_rejected_scores)
+        else:
+            average_score = 0.0
+        
+        if total_questions > 0:
+            answer_rate = answered_questions / total_questions
+            relevance_percentage = (average_score * 0.7 + answer_rate * 0.3) * 100
+        else:
+            relevance_percentage = 0.0
+        
+        if relevance_percentage >= 70:
+            relevance_tag = 'Relevant'
+        elif relevance_percentage >= 40:
+            relevance_tag = 'Partially Relevant'
+        else:
+            relevance_tag = 'Irrelevant'
+        
+        return {
+            'relevance_tag': relevance_tag,
+            'relevance_percentage': round(relevance_percentage, 2),
+            'total_questions': total_questions,
+            'answered_questions': answered_questions
+        }
+
+# Initialize global calculator instance
+_relevance_calculator = RelevanceCalculator()
+
+def calculate_relevance_tag(answers, task_question=None):
     """
-    Calculate relevance tag based on answers.
-    Handles YES/NO answers, descriptive answers, and mixed combinations.
+    Enhanced relevance calculation with proper rejection detection and semantic matching.
+    Backward compatible wrapper for the improved calculator.
     """
     if not answers or not isinstance(answers, list):
         return 'Irrelevant'
-
-    total_answers = len(answers)
-    if total_answers == 0:
-        return 'Irrelevant'
-
-    yes_no_answers = []
-    descriptive_answers = []
-
-    # Categorize answers
-    for answer in answers:
-        if answer is None or str(answer).strip() == '':
-            continue
-        answer_str = str(answer).strip().upper()
-        if answer_str in ['YES', 'NO']:
-            yes_no_answers.append(answer_str)
-        else:
-            # Consider it descriptive if it's not just YES/NO
-            descriptive_answers.append(str(answer).strip())
-
-    # Calculate scores for each type
-    yes_no_score = 0
-    descriptive_score = 0
-
-    # Score YES/NO answers
-    if yes_no_answers:
-        yes_count = sum(1 for answer in yes_no_answers if answer == 'YES')
-        yes_no_score = (yes_count / len(yes_no_answers)) if yes_no_answers else 0
-
-    # Score descriptive answers
-    if descriptive_answers:
-        total_desc_score = 0
-        for desc_answer in descriptive_answers:
-            # Score based on length and content richness
-            length_score = min(len(desc_answer) / 50, 1)  # Max score for 50+ chars
-
-            # Bonus for containing specific educational terms
-            education_terms = ['student', 'teacher', 'school', 'class', 'learning',
-                             'activity', 'meeting', 'enrollment', 'enrolment',
-                             'छात्र', 'शिक्षक', 'विद्यालय', 'कक्षा']  # Added Hindi terms
-            term_count = sum(1 for term in education_terms if term.lower() in desc_answer.lower())
-            term_score = min(term_count / 3, 1)  # Max score for 3+ terms
-
-            # Avoid very short or generic answers
-            if len(desc_answer) < 10:
-                total_desc_score += 0.2  # Low score for very short answers
-            else:
-                total_desc_score += (length_score * 0.6 + term_score * 0.4)
-
-        descriptive_score = total_desc_score / len(descriptive_answers)
-
-    # Combine scores based on answer type distribution
-    if yes_no_answers and descriptive_answers:
-        # Mixed answers - weighted average based on count
-        yes_no_weight = len(yes_no_answers) / total_answers
-        descriptive_weight = len(descriptive_answers) / total_answers
-        combined_score = (yes_no_score * yes_no_weight) + (descriptive_score * descriptive_weight)
-    elif yes_no_answers:
-        # Only YES/NO answers
-        combined_score = yes_no_score
-    elif descriptive_answers:
-        # Only descriptive answers
-        combined_score = descriptive_score
+    
+    # Handle multiple questions (pipe-separated)
+    if task_question and '|' in task_question:
+        questions = [q.strip() for q in task_question.split('|') if q.strip()]
+    elif task_question:
+        questions = [task_question]
     else:
-        return 'Irrelevant'
-
-    # Determine relevance tag based on combined score
-    if combined_score >= 0.7:
-        return 'Relevant'
-    elif combined_score >= 0.4:
-        return 'Partially Relevant'
-    else:
-        return 'Irrelevant'
+        questions = [f"Question {i+1}" for i in range(len(answers))]
+    
+    # Ensure matching lengths
+    if len(questions) < len(answers):
+        questions.extend([questions[-1]] * (len(answers) - len(questions)))
+    elif len(answers) < len(questions):
+        questions = questions[:len(answers)]
+    
+    result = _relevance_calculator.calculate_task_relevance(questions, answers)
+    return result['relevance_tag']
 
 def adjust_excel_formatting(output_file):
     # This function is for .xlsx, but the script now saves .csv
@@ -540,15 +801,31 @@ def rate_limiter():
         _request_times.append(time.time())
 
 
-def process_image(task_evidence_link, task_evidence_question, task_name=None, max_retries=3):
+def process_evidence(task_evidence_link, task_evidence_question, task_name=None, max_retries=3):
     global current_token_index
     retries = 0
+    
+    # Determine file type from URL
+    lower_url = task_evidence_link.lower()
+    is_pdf = any(lower_url.endswith(ext) for ext in PDF_FORMATS)
+    is_excel = any(lower_url.endswith(ext) for ext in EXCEL_FORMATS)
+    is_image = any(lower_url.endswith(ext) for ext in IMAGE_FORMATS)
+    
+    # MIME type for Gemini
+    mime_type = "image/jpeg" # Default
+    if is_pdf:
+        mime_type = "application/pdf"
+    
     while retries < max_retries:
         try:
             rate_limiter()
-            image = httpx.get(task_evidence_link)
-
-            # Check if this is an enrollment-related task (normalize both sides)
+            response_data = httpx.get(task_evidence_link, follow_redirects=True)
+            response_data.raise_for_status()
+            
+            # Content processing variables
+            content_parts = []
+            
+            # Check if this is an enrollment-related task
             task_name_normalized_check = (task_name.strip().rstrip("'.\"").strip() if task_name else "")
             filter_normalized_check = ENROLLMENT_TASK_FILTER.strip().rstrip("'.\"").strip()
             is_enrollment_task = (task_name_normalized_check == filter_normalized_check)
@@ -556,34 +833,83 @@ def process_image(task_evidence_link, task_evidence_question, task_name=None, ma
             if is_enrollment_task:
                 logging.info(f"[Enrollment] Model selection: Using enrollment_model for task '{task_name_normalized_check}'")
 
-            # Flexible prompt that allows both YES/NO and descriptive answers
-            prompt = f"""You are an educational evidence validator. Analyze the given image and answer these questions:
+            # Base Prompt construction
+            prompt_intro = "You are an educational evidence validator. Analyze the given evidence file and answer these questions:"
+            if is_excel:
+                prompt_intro = "You are an educational evidence validator. Analyze the given EXCEL DATA (provided below as text) and answer these questions:"
+                
+            prompt = f"""{prompt_intro}
 
 {task_evidence_question}
 
-For each question, you can provide either:
-1. A clear YES or NO answer with brief reasoning, OR
-2. A detailed, descriptive answer that thoroughly explains what you observe
 
-Choose the response format that best fits the question and provides the most valuable assessment of the evidence.
+IMPORTANT: Provide **EXACTLY ONE** answer for **EACH NUMBERED** question above.
+
+- If a question contains "or" (e.g., "sitting or talking"), treat it as a SINGLE question with multiple possibilities, NOT as separate questions.
+- Each answer should follow this format: "[YES/NO/PARTIAL]. [Detailed reasoning and evidence from the file]"
+- Start with a clear judgment (YES, NO, or PARTIAL) if possible.
+- Immediately follow with the reasoning in the same sentence or paragraph.
+- Do NOT split the answer into multiple parts.
+- Do NOT provide a separate "Reasoning" field. Put all reasoning in the answer text itself.
+
+⚠️ IMPORTANT FOR MULTI-CHOICE QUESTIONS:
+If a question asks "...whether X, Y, or Z", your answer should be:
+- "X. [explanation]" if X is true
+- "Y. [explanation]" if Y is true  
+- "Z. [explanation]" if Z is true
+DO NOT start with YES/NO for these questions - use the actual option (X, Y, or Z).
+
+Example of GOOD output for "whether consistently increased, decreased, or inconsistently":
+["INCONSISTENTLY. The enrollment numbers changed from 31 to 38 to 28 to 27 to 16, showing no consistent pattern."]
+
+Example of BAD output (Do NOT do this):
+["NO. The enrollment changed inconsistently..."]  ❌ Contradictory!
+
+Example of GOOD output for yes/no question:
+["NO. The enrolment number has decreased over the period as shown by..."]
+
+Example for question with "or" clause:
+Question: "Does the picture show two or more people sitting or talking?"
+CORRECT: ["NO. The picture shows only one person."]
+WRONG: ["NO", "NO"] ❌ (This treats "sitting" and "talking" as separate questions!)
 
 Focus on:
-- Visual evidence in the image
-- Relevance to the question
-- Quality and clarity of the evidence
-- Educational context and completeness"""
+- Evidence quality and relevance
+- Educational context
+- Answer the EXACT question asked
+- ONE answer per NUMBERED question (not per "or" clause)
+"""
+            # Handle Excel Content (Convert to Text)
+            if is_excel:
+                try:
+                    excel_data = pd.read_excel(io.BytesIO(response_data.content))
+                    # Convert to reasonable markdown/string representation
+                    # Limiting rows/cols to avoid token explosion if file is huge
+                    text_representation = excel_data.head(50).to_string(index=False) 
+                    prompt += f"\n\n=== EXCEL DATA CONTENT (First 50 rows) ===\n{text_representation}\n==============================\n"
+                    # For Excel, we only send text prompts
+                    content_parts = [prompt]
+                except Exception as e:
+                    logging.error(f"Failed to parse Excel file: {e}")
+                    return {"error": f"Failed to parse Excel file: {e}"}
 
-            # Select model and update prompt based on task type
-            selected_model = model
+            # Handle Binary Content (Image or PDF)
+            else:
+                # Add binary part
+                content_parts = [
+                    {"mime_type": mime_type, "data": base64.b64encode(response_data.content).decode("utf-8")},
+                    prompt
+                ]
+
+            # Append Enrollment Instructions if needed
             if is_enrollment_task:
-                selected_model = enrollment_model
                 prompt += """
 
 ====================================================================================
-⚠️ CRITICAL: ENROLLMENT DATA EXTRACTION FROM REPORT IMAGE ⚠️
+⚠️ CRITICAL: ENROLLMENT DATA EXTRACTION ⚠️
 ====================================================================================
 
-You are analyzing an ENROLLMENT REPORT table/image. You MUST extract THREE DIFFERENT numerical values:
+You are analyzing an ENROLLMENT REPORT. You MUST extract THREE DIFFERENT numerical values:
 
 📊 VALUE 1: enrollment_2024 (INTEGER - Student Count)
    WHERE TO FIND: Look for column headers or labels like:
@@ -632,48 +958,27 @@ You are analyzing an ENROLLMENT REPORT table/image. You MUST extract THREE DIFFE
 4. ❌ Extracting percentages as counts (8% as enrollment count)
 
 ====================================================================================
-✅ CORRECT EXAMPLE FROM A TABLE:
-====================================================================================
-Table shows:
-| School | Last Year | Current Year | % Increase |
-| ABC    | 120       | 144          | 20%        |
-
-CORRECT JSON Response:
-{
-  "answers": ["20%"],
-  "reasonings": ["The table shows clear enrollment data"],
-  "enrollment_2024": 120,     ← Last Year count
-  "enrollment_2025": 144,     ← Current Year count  
-  "enrollment_increase_percentage": 20.0   ← Percentage
-}
-
-====================================================================================
-✅ ANOTHER CORRECT EXAMPLE:
-====================================================================================
-Table shows:
-| District | 2024 | 2025 | Growth |
-| XYZ      | 85   | 96   | -20%   |
-
-CORRECT JSON Response:
-{
-  "answers": ["The enrollment decreased by 20%"],
-  "reasonings": ["Based on the table data"],
-  "enrollment_2024": 85,      ← 2024 count
-  "enrollment_2025": 96,      ← 2025 count
-  "enrollment_increase_percentage": -20.0  ← Negative percentage
-}
-
-====================================================================================
 ⚠️ If you cannot find a value clearly, set it to null. Do NOT guess!
 ====================================================================================
-"""
+""" 
+                # Be careful: for Excel, 'prompt' is already in content_parts[0], so we need to update it.
+                # For binary, 'prompt' is content_parts[1].
+                if is_excel:
+                    content_parts[0] += prompt.split("==============================\n")[-1] # Append only the new instruction part? No, prompt variable was updated locally but not inside the list yet? 
+                    # Actually, simply rebuilding content_parts is safer
+                    content_parts = [prompt]
+                else:
+                    content_parts[1] = prompt
 
-            response = selected_model.generate_content([
-                {"mime_type": "image/jpeg", "data": base64.b64encode(image.content).decode("utf-8")},
-                prompt,
-            ])
+            # Select model
+            selected_model = model
+            if is_enrollment_task:
+                selected_model = enrollment_model
+
+            response = selected_model.generate_content(content_parts)
             response_json = json.loads(response.text)
             return response_json
+            
         except Exception as e:
             error_str = str(e).lower()
             if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
@@ -685,8 +990,9 @@ CORRECT JSON Response:
                     time.sleep(60)
                     retries += 1
             else:
-                logging.error(f"[Gemini] Error: {e}")
+                logging.error(f"[Gemini] Error processing {task_evidence_link}: {e}")
                 retries += 1
+                
     logging.error("[Gemini] Max retries reached.")
     return {"error": "Max retries reached"}
 
@@ -718,6 +1024,7 @@ def main(input_file, worker_id=None):
         task_evidence_qa = []
         task_evidence_qa_reason = []
         relevance_tags = []
+        relevance_percentages = []  # 🆕 Track relevance percentage
         task_types = []  # Track if task is standard or user-owned
         
         # 🆕 Initialize extra keys columns
@@ -746,15 +1053,79 @@ def main(input_file, worker_id=None):
 
             task_types.append("User-Owned" if is_user_owned else "Standard")
 
-            if any(task_evidence.lower().endswith(ext) for ext in IMAGE_FORMATS):
+            if any(task_evidence.lower().endswith(ext) for ext in SUPPORTED_EVIDENCE_FORMATS):
                 logging.info(f"[Worker {worker_id}] Processing {'user-owned' if is_user_owned else 'standard'} task row {idx+1}/{len(df_filtered)}")
-                response = process_image(task_evidence, task_question, task_name_raw)
-                if isinstance(response, dict) and "answers" in response and "reasonings" in response:
+                response = process_evidence(task_evidence, task_question, task_name_raw)
+                if isinstance(response, dict) and "answers" in response:
                     answers = response["answers"]
-                    reasonings = response["reasonings"]
-                    task_evidence_qa.append(answers)
-                    task_evidence_qa_reason.append(reasonings)
-                    relevance_tags.append(calculate_relevance_tag(answers))
+                    
+                    # 🆕 SMART DEDUPLICATION: Ensure exactly one answer per question
+                    # Count actual number of questions
+                    def count_questions(q_string):
+                        if not q_string:
+                            return 1
+                        # Method 1: Pipe-separated questions
+                        if '|' in q_string:
+                            return len([q.strip() for q in q_string.split('|') if q.strip()])
+                        # Method 2: Multiple numbered questions (e.g., "1. ... 2. ...")
+                        numbered = re.findall(r'\d+\.\s+', q_string)
+                        if len(numbered) > 1:
+                            return len(numbered)
+                        # Default: Single question
+                        return 1
+                    
+                    expected_answer_count = count_questions(task_question)
+                    actual_answer_count = len(answers)
+                    
+                    # Only deduplicate if we got MORE answers than expected
+                    if actual_answer_count > expected_answer_count:
+                        logging.warning(f"[Worker {worker_id}] Row {idx+1}: Expected {expected_answer_count} answer(s) but got {actual_answer_count}")
+                        logging.warning(f"[Worker {worker_id}] Question: {task_question}")
+                        logging.warning(f"[Worker {worker_id}] Original answers: {answers}")
+                        
+                        # Remove duplicate answers while preserving order
+                        unique_answers = []
+                        seen = set()
+                        for ans in answers:
+                            ans_normalized = str(ans).strip().upper()
+                            if ans_normalized not in seen:
+                                unique_answers.append(ans)
+                                seen.add(ans_normalized)
+                        
+                        # If deduplication gives us the right count, use it
+                        if len(unique_answers) == expected_answer_count:
+                            answers = unique_answers
+                            logging.info(f"[Worker {worker_id}] ✅ Deduplicated to {len(answers)} unique answers: {answers}")
+                        # If still too many, keep first N
+                        elif len(unique_answers) > expected_answer_count:
+                            answers = unique_answers[:expected_answer_count]
+                            logging.info(f"[Worker {worker_id}] ✅ Kept first {expected_answer_count} answers: {answers}")
+                        # If fewer unique than expected, keep what we have
+                        else:
+                            answers = unique_answers
+                            logging.warning(f"[Worker {worker_id}] ⚠️ Only {len(answers)} unique answers for {expected_answer_count} questions")
+                    
+                    # 🆕 NEW LOGIC: Extract YES/NO from answers and create clean columns
+                    clean_answers = []
+                    full_reasonings = []
+                    
+                    for ans in answers:
+                        clean_ans, full_reason = extract_yes_no_from_answer(ans)
+                        clean_answers.append(clean_ans)
+                        full_reasonings.append(full_reason)
+                    
+                    # Store clean answers (just YES/NO if applicable) in Q&A column
+                    task_evidence_qa.append(clean_answers)
+                    # Store full reasoning in Q&A Reason column
+                    task_evidence_qa_reason.append(full_reasonings)
+                    
+                    # 🆕 Calculate relevance with percentage (using full reasoning for better accuracy)
+                    relevance_result = _relevance_calculator.calculate_task_relevance(
+                        questions=[task_question] if task_question else [f"Question {i+1}" for i in range(len(answers))],
+                        answers=full_reasonings  # Use full reasoning for relevance calculation
+                    )
+                    relevance_tags.append(relevance_result['relevance_tag'])
+                    relevance_percentages.append(relevance_result['relevance_percentage'])
 
                     # 🆕 Extract enrollment data from JSON response or use regex fallback
                     if ENABLE_EXTRA_KEYS:
@@ -768,7 +1139,6 @@ def main(input_file, worker_id=None):
                             logging.info(f"[Enrollment] Expected filter: '{enrollment_filter_normalized}'")
                             logging.info(f"[Enrollment] Match: {task_name_normalized == enrollment_filter_normalized}")
                         
-                        # Check if this is an enrollment task response with enrollment fields
                         # Check if this is an enrollment task (regardless of whether API returned enrollment keys)
                         is_enrollment_task = (task_name_normalized == enrollment_filter_normalized)
                         
@@ -787,7 +1157,7 @@ def main(input_file, worker_id=None):
                             
                             # Validate and fix enrollment data
                             answers_text = ' '.join(str(a) for a in answers)
-                            reasonings_text = ' '.join(str(r) for r in reasonings)
+                            reasonings_text = ' '.join(str(r) for r in full_reasonings)
                             
                             validated_2024, validated_2025, validated_pct = validate_and_fix_enrollment_data(
                                 raw_2024, raw_2025, raw_pct, answers_text, reasonings_text
@@ -805,7 +1175,7 @@ def main(input_file, worker_id=None):
                                 'Task Remarks': row.get('Task Remarks', ''),
                                 'Sub-Tasks': row.get('Sub-Tasks', ''),
                                 'Answers': ' '.join(str(a) for a in answers),
-                                'Reasonings': ' '.join(str(r) for r in reasonings)
+                                'Reasonings': ' '.join(str(r) for r in full_reasonings)
                             }
                             extracted = extract_extra_keys(text_to_analyze, task_name_normalized)
                             for key in EXTRA_KEYS.keys():
@@ -818,15 +1188,17 @@ def main(input_file, worker_id=None):
                     task_evidence_qa.append(None)
                     task_evidence_qa_reason.append(None)
                     relevance_tags.append('Irrelevant')
+                    relevance_percentages.append(0.0)  # 🆕 Add percentage
                     task_types[-1] = "Failed"  # Update the last task type
                     for key in EXTRA_KEYS.keys():
                         extra_keys_data[key].append(None)
             else:
-                logging.info(f"[Worker {worker_id}] Skipping non-image row {idx+1}")
+                logging.info(f"[Worker {worker_id}] Skipping non-supported evidence row {idx+1}")
                 task_evidence_qa.append(None)
                 task_evidence_qa_reason.append(None)
                 relevance_tags.append('Irrelevant')
-                task_types.append("Non-Image")
+                relevance_percentages.append(0.0)  # 🆕 Add percentage
+                task_types.append("Non-Supported")
                 for key in EXTRA_KEYS.keys():
                     extra_keys_data[key].append(None)
 
@@ -839,6 +1211,7 @@ def main(input_file, worker_id=None):
         df_filtered["Task evidence Q and A"] = task_evidence_qa
         df_filtered["Task evidence Q and A Reason"] = task_evidence_qa_reason
         df_filtered["Relevance Tag"] = relevance_tags
+        df_filtered["Relevance Percentage"] = relevance_percentages  # 🆕 Add percentage column
         df_filtered["Task Type"] = task_types
         
         # 🆕 Add extra keys columns (without "Extra_" prefix)

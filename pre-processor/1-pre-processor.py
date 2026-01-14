@@ -6,7 +6,8 @@ from tqdm import tqdm  # Import tqdm for the progress bar
 
 # === Configuration ===
 # INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/sample_input.csv"
-INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/sample_haryana_custom_task.csv"
+# INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/sample_haryana_custom_task.csv"
+INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/other_types.csv"
 QUESTION_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/questions.csv"
 FILTER_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/school_list.csv"
 USE_SCHOOL_FILTER = os.getenv("USE_SCHOOL_FILTER", False)  # Set to True to filter by school_list.csv, False to skip this filter
@@ -18,6 +19,11 @@ ROWS_PER_FILE = os.getenv("ROWS_PER_FILE", 10000)  # Only used if SPLIT_FILES = 
 
 # === IMAGE FORMATS ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+PDF_FORMATS = {".pdf"}
+DATA_FORMATS = {".csv", ".xlsx", ".xls"}
+
+# Combine all valid formats
+VALID_FORMATS = IMAGE_FORMATS | PDF_FORMATS | DATA_FORMATS
 
 # Create output directory
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -26,7 +32,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 skip_task_start = 0
 skip_evidence_null = 0
 skip_school_mismatch = 0
-skip_non_image = 0
+skip_invalid_format = 0
 total_input_rows = 0 # This will be set correctly below
 
 # === Step 1: Load FILTER_CSV school codes into a set ===
@@ -53,16 +59,16 @@ def clean_cell(value):
     # Strip whitespace, then strip both single and double quotes
     return value.strip().strip("'\"")
 
-# === Helper function to check if URL is an image ===
-def is_image_url(url):
-    """Check if URL points to an image file"""
+# === Helper function to check if URL is a valid file ===
+def is_valid_file_url(url):
+    """Check if URL points to a valid file (Image, PDF, Excel, CSV)"""
     url = clean_cell(url) # Clean the URL string first for *checking*
     if not url or url.lower() == "null":
         return False
     try:
         parsed = urlparse(url)
         path = parsed.path.lower()
-        return any(path.endswith(ext) for ext in IMAGE_FORMATS)
+        return any(path.endswith(ext) for ext in VALID_FORMATS)
     except:
         return False
 
@@ -148,9 +154,9 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
         skip_evidence_null += 1
         continue
 
-    # Rule 3: Skip if evidence URL is not an image format
-    if not is_image_url(evidence): # Send the raw evidence to be checked
-        skip_non_image += 1
+    # Rule 3: Skip if evidence URL is not a valid format
+    if not is_valid_file_url(evidence): # Send the raw evidence to be checked
+        skip_invalid_format += 1
         continue
 
     # === Step 4: Fill additional columns & Clean District ===
@@ -219,8 +225,8 @@ print(f"{'Task starts with 1 or 8':<50} {skip_task_start:<10} {remaining_after_t
 remaining_after_evidence = remaining_after_task - skip_evidence_null
 print(f"{'Task Evidence empty or null':<50} {skip_evidence_null:<10} {remaining_after_evidence}")
 
-remaining_after_non_image = remaining_after_evidence - skip_non_image
-print(f"{'Task Evidence is not an image (video/other)':<50} {skip_non_image:<10} {remaining_after_non_image}")
+remaining_after_invalid = remaining_after_evidence - skip_invalid_format
+print(f"{'Task Evidence invalid format (not img/pdf/data)':<50} {skip_invalid_format:<10} {remaining_after_invalid}")
 
 print(f"\n{'='*70}")
 print(f"Final output CSV rows: {len(filtered_rows)}")
@@ -244,7 +250,7 @@ print("\n  For EACH row, the following filters were applied (in order):")
 print("  ➡️ 1. SKIPPED if 'School ID' was not in the valid school list.")
 print("  ➡️ 2. SKIPPED if 'Tasks' value (after cleaning) started with '1' or '8'.")
 print("  ➡️ 3. SKIPPED if 'Task Evidence' (after cleaning) was empty or 'null'.")
-print("  ➡️ 4. SKIPPED if 'Task Evidence' URL was not an image (e.g., .mp4, .pdf).")
+print("  ➡️ 4. SKIPPED if 'Task Evidence' URL was not a valid format (Image, PDF, Excel, CSV).")
 
 print("\n  For EACH row that PASSED all filters:")
 print("  ➡️ Cleaned and matched 'Tasks' to populate 'Task Evidence Question'.")

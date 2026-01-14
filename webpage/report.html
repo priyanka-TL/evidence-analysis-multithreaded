@@ -1130,13 +1130,25 @@
                         "Partially Relevant": 0,
                         Irrelevant: 0,
                         blocks: new Set(),
-                        schools: new Set()
+                        schools: new Set(),
+                        // NEW: Track relevance percentage if column exists
+                        relevancePercentageSum: 0,
+                        relevancePercentageCount: 0,
+                        hasPercentageColumn: false
                     };
                 }
                 districtStats[dist].total++;
                 districtStats[dist].blocks.add(blk);
                 districtStats[dist].schools.add(school);
                 if (rel && districtStats[dist][rel] !== undefined) districtStats[dist][rel]++;
+
+                // NEW: Use Relevance Percentage column if it exists
+                const relevancePercentage = parseFloat(row["Relevance Percentage"]);
+                if (!isNaN(relevancePercentage)) {
+                    districtStats[dist].hasPercentageColumn = true;
+                    districtStats[dist].relevancePercentageSum += relevancePercentage;
+                    districtStats[dist].relevancePercentageCount++;
+                }
 
                 const keyBlk = blk;
                 if (!blockStats[keyBlk]) {
@@ -1549,6 +1561,7 @@
                 const blk = row["Block"] || "Unknown";
                 const school = row["School Name"] || "Unknown";
                 const rel = row["Relevance Tag"]?.trim();
+                const relevancePercentage = parseFloat(row["Relevance Percentage"]);
 
                 if (!hierarchicalData[dist]) {
                     hierarchicalData[dist] = {
@@ -1556,7 +1569,10 @@
                         Relevant: 0,
                         "Partially Relevant": 0,
                         Irrelevant: 0,
-                        blocks: {}
+                        blocks: {},
+                        // Track relevance percentages
+                        relevancePercentageSum: 0,
+                        relevancePercentageCount: 0
                     };
                 }
 
@@ -1566,7 +1582,10 @@
                         Relevant: 0,
                         "Partially Relevant": 0,
                         Irrelevant: 0,
-                        schools: {}
+                        schools: {},
+                        // Track relevance percentages
+                        relevancePercentageSum: 0,
+                        relevancePercentageCount: 0
                     };
                 }
 
@@ -1575,7 +1594,10 @@
                         total: 0,
                         Relevant: 0,
                         "Partially Relevant": 0,
-                        Irrelevant: 0
+                        Irrelevant: 0,
+                        // Track relevance percentages
+                        relevancePercentageSum: 0,
+                        relevancePercentageCount: 0
                     };
                 }
 
@@ -1589,13 +1611,29 @@
                     hierarchicalData[dist].blocks[blk][rel]++;
                     hierarchicalData[dist].blocks[blk].schools[school][rel]++;
                 }
+
+                // Track relevance percentages if column exists
+                if (!isNaN(relevancePercentage)) {
+                    hierarchicalData[dist].relevancePercentageSum += relevancePercentage;
+                    hierarchicalData[dist].relevancePercentageCount++;
+                    hierarchicalData[dist].blocks[blk].relevancePercentageSum += relevancePercentage;
+                    hierarchicalData[dist].blocks[blk].relevancePercentageCount++;
+                    hierarchicalData[dist].blocks[blk].schools[school].relevancePercentageSum += relevancePercentage;
+                    hierarchicalData[dist].blocks[blk].schools[school].relevancePercentageCount++;
+                }
             });
 
             const sortedDistricts = Object.keys(hierarchicalData).sort();
 
             for (const dist of sortedDistricts) {
                 const distData = hierarchicalData[dist];
-                const distRelevantPercent = distData.total > 0 ? ((distData.Relevant / distData.total) * 100).toFixed(1) : 0;
+                // Use Relevance Percentage column if available, otherwise calculate from counts
+                let distRelevantPercent;
+                if (distData.relevancePercentageCount > 0) {
+                    distRelevantPercent = (distData.relevancePercentageSum / distData.relevancePercentageCount).toFixed(1);
+                } else {
+                    distRelevantPercent = distData.total > 0 ? ((distData.Relevant / distData.total) * 100).toFixed(1) : 0;
+                }
                 const blockCount = Object.keys(distData.blocks).length;
                 const schoolCount = new Set(
                     Object.values(distData.blocks).flatMap(b => Object.keys(b.schools))
@@ -1623,7 +1661,13 @@
                 const sortedBlocks = Object.keys(distData.blocks).sort();
                 for (const blk of sortedBlocks) {
                     const blockData = distData.blocks[blk];
-                    const blockRelevantPercent = blockData.total > 0 ? ((blockData.Relevant / blockData.total) * 100).toFixed(1) : 0;
+                    // Use Relevance Percentage column if available, otherwise calculate from counts
+                    let blockRelevantPercent;
+                    if (blockData.relevancePercentageCount > 0) {
+                        blockRelevantPercent = (blockData.relevancePercentageSum / blockData.relevancePercentageCount).toFixed(1);
+                    } else {
+                        blockRelevantPercent = blockData.total > 0 ? ((blockData.Relevant / blockData.total) * 100).toFixed(1) : 0;
+                    }
                     const blockSchoolCount = Object.keys(blockData.schools).length;
 
                     distHtml += `
@@ -1647,7 +1691,13 @@
                     const sortedSchools = Object.keys(blockData.schools).sort();
                     for (const school of sortedSchools) {
                         const schoolData = blockData.schools[school];
-                        const schoolRelevantPercent = schoolData.total > 0 ? ((schoolData.Relevant / schoolData.total) * 100).toFixed(1) : 0;
+                        // Use Relevance Percentage column if available, otherwise calculate from counts
+                        let schoolRelevantPercent;
+                        if (schoolData.relevancePercentageCount > 0) {
+                            schoolRelevantPercent = (schoolData.relevancePercentageSum / schoolData.relevancePercentageCount).toFixed(1);
+                        } else {
+                            schoolRelevantPercent = schoolData.total > 0 ? ((schoolData.Relevant / schoolData.total) * 100).toFixed(1) : 0;
+                        }
 
                         distHtml += `
                         <tr class="school-row hidden-row block-${dist.replace(/[^a-zA-Z0-9]/g, '_')}-${blk.replace(/[^a-zA-Z0-9]/g, '_')}">
@@ -2576,7 +2626,13 @@
                 const matchedDistrict = Object.keys(districtStats).find(key => key.toLowerCase().trim() === districtName.toLowerCase().trim());
                 if (matchedDistrict) {
                     const stats = districtStats[matchedDistrict];
-                    const percentage = stats.total > 0 ? ((stats.Relevant / stats.total) * 100).toFixed(1) : 0;
+                    // Use Relevance Percentage column if available, otherwise calculate from counts
+                    let percentage;
+                    if (stats.hasPercentageColumn && stats.relevancePercentageCount > 0) {
+                        percentage = (stats.relevancePercentageSum / stats.relevancePercentageCount).toFixed(1);
+                    } else {
+                        percentage = stats.total > 0 ? ((stats.Relevant / stats.total) * 100).toFixed(1) : 0;
+                    }
                     color = getColorForPercentage(parseFloat(percentage));
                     tooltipText = `${districtName}\n${percentage}% Relevant\nTotal: ${stats.total}\nRelevant: ${stats.Relevant}\nPartially: ${stats["Partially Relevant"]}\nIrrelevant: ${stats.Irrelevant}`;
                 }
@@ -2653,7 +2709,13 @@
                 const matchedDistrict = Object.keys(districtStats || {}).find(key => key.toLowerCase().trim() === districtName.toLowerCase().trim());
                 if (matchedDistrict) {
                     const stats = districtStats[matchedDistrict];
-                    const percentage = stats.total > 0 ? ((stats.Relevant / stats.total) * 100).toFixed(1) : 0;
+                    // Use Relevance Percentage column if available, otherwise calculate from counts
+                    let percentage;
+                    if (stats.hasPercentageColumn && stats.relevancePercentageCount > 0) {
+                        percentage = (stats.relevancePercentageSum / stats.relevancePercentageCount).toFixed(1);
+                    } else {
+                        percentage = stats.total > 0 ? ((stats.Relevant / stats.total) * 100).toFixed(1) : 0;
+                    }
                     color = getColorForPercentage(parseFloat(percentage));
                     tooltipText = `${districtName}\n${percentage}% Relevant\nTotal: ${stats.total}\nRelevant: ${stats.Relevant}\nPartially: ${stats["Partially Relevant"]}\nIrrelevant: ${stats.Irrelevant}`;
                 }
