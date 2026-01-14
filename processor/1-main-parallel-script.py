@@ -36,7 +36,7 @@ STATE_NAME = os.getenv("STATE_NAME", "HARYANA")  # Default: HARYANA
 
 # === ANSWER FORMAT CONFIGURATION ===
 # Set to True for descriptive answers, False for YES/NO answers
-USE_DESCRIPTIVE_ANSWERS = True
+USE_DESCRIPTIVE_ANSWERS = os.getenv("USE_DESCRIPTIVE_ANSWERS", True)
 
 # ==== 🆕 ENROLLMENT CONFIGURATION ====
 # Configure which task should be processed for enrollment data (loaded from .env)

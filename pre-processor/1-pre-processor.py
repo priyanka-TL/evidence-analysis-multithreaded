@@ -9,12 +9,12 @@ INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithrea
 # INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/sample_haryana_custom_task.csv"
 QUESTION_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/questions.csv"
 FILTER_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/school_list.csv"
-USE_SCHOOL_FILTER = False  # Set to True to filter by school_list.csv, False to skip this filter
+USE_SCHOOL_FILTER = os.getenv("USE_SCHOOL_FILTER", False)  # Set to True to filter by school_list.csv, False to skip this filter
 OUTPUT_DIR = "output-pre-processor"
 
 # === SPLIT CONFIGURATION ===
-SPLIT_FILES = "yes"  # Set to "yes" to split into multiple files, "no" for single file
-ROWS_PER_FILE = 10000  # Only used if SPLIT_FILES = "yes"
+SPLIT_FILES = os.getenv("SPLIT_FILES", "yes")  # Set to "yes" to split into multiple files, "no" for single file
+ROWS_PER_FILE = os.getenv("ROWS_PER_FILE", 10000)  # Only used if SPLIT_FILES = "yes"
 
 # === EVIDENCE FORMATS ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
