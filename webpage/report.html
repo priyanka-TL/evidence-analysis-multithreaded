@@ -534,9 +534,19 @@
             }
 
             .chart-container,
-            table,
             .top-blocks,
             .bottom-blocks {
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
+            }
+
+            /* Allow tables to break across pages, but keep rows intact */
+            table {
+                page-break-inside: auto !important;
+                break-inside: auto !important;
+            }
+
+            tr {
                 page-break-inside: avoid !important;
                 break-inside: avoid !important;
             }
@@ -2019,7 +2029,11 @@
         // Export custom tasks function removed - use processor/6-user-owned-tasks-analyzer.py instead
 
         // NEW: Enrollment Analytics Generation
+        // NEW: Enrollment Analytics Generation (Optimized for Lazy Loading)
         function generateEnrollmentAnalytics(enrollmentStats) {
+            // Store data globally for lazy loading
+            window.enrollmentStatsData = enrollmentStats;
+
             // Show enrollment section
             document.getElementById('enrollmentSection').classList.remove('hidden');
 
@@ -2028,8 +2042,6 @@
             let totalEnrollment2025 = 0;
             let avgIncreaseSum = 0;
             let avgIncreaseCount = 0;
-            let schoolsWithIncrease = 0;
-            let schoolsWithDecrease = 0;
 
             Object.values(enrollmentStats).forEach(distData => {
                 totalEnrollment2024 += distData.enrollment2024;
@@ -2103,16 +2115,14 @@
                 }
             });
 
-            // Enrollment Growth Chart (Top 10 Districts)
-            const districtGrowth = districtLabels.map(dist => {
-                const stats = enrollmentStats[dist];
-                const growth = stats.enrollment2024 > 0
-                    ? ((stats.enrollment2025 - stats.enrollment2024) / stats.enrollment2024 * 100)
-                    : 0;
-                return { district: dist, growth: growth };
-            });
-            districtGrowth.sort((a, b) => b.growth - a.growth);
-            const top10 = districtGrowth.slice(0, 10);
+            // Enrollment Growth Chart
+            const sortedByGrowth = Object.entries(enrollmentStats)
+                .map(([name, data]) => ({
+                    name,
+                    growth: data.enrollment2024 > 0 ? ((data.enrollment2025 - data.enrollment2024) / data.enrollment2024 * 100) : 0
+                }))
+                .sort((a, b) => b.growth - a.growth)
+                .slice(0, 10);
 
             if (window.enrollmentGrowthChart && typeof window.enrollmentGrowthChart.destroy === 'function') {
                 window.enrollmentGrowthChart.destroy();
@@ -2121,12 +2131,12 @@
                 type: 'bar',
                 indexAxis: 'y',
                 data: {
-                    labels: top10.map(d => d.district),
+                    labels: sortedByGrowth.map(d => d.name),
                     datasets: [{
-                        label: 'Enrollment Growth %',
-                        data: top10.map(d => d.growth),
-                        backgroundColor: top10.map(d => d.growth >= 0 ? 'rgba(66, 230, 149, 0.8)' : 'rgba(255, 107, 107, 0.8)'),
-                        borderColor: top10.map(d => d.growth >= 0 ? '#42e695' : '#ff6b6b'),
+                        label: 'Growth %',
+                        data: sortedByGrowth.map(d => d.growth),
+                        backgroundColor: sortedByGrowth.map(d => d.growth >= 0 ? 'rgba(66, 230, 149, 0.6)' : 'rgba(255, 107, 107, 0.6)'),
+                        borderColor: sortedByGrowth.map(d => d.growth >= 0 ? '#42e695' : '#ff6b6b'),
                         borderWidth: 2
                     }]
                 },
@@ -2135,15 +2145,7 @@
                     responsive: true,
                     plugins: { legend: { display: false } },
                     scales: {
-                        x: {
-                            beginAtZero: true,
-                            grid: { color: 'rgba(0,0,0,0.1)' },
-                            ticks: {
-                                callback: function (value) {
-                                    return value + '%';
-                                }
-                            }
-                        },
+                        x: { grid: { color: 'rgba(0,0,0,0.1)' } },
                         y: { grid: { display: false } }
                     }
                 }
@@ -2199,7 +2201,6 @@
             allBlocks.sort((a, b) => b.enrollment - a.enrollment);
             allSchools.sort((a, b) => b.enrollment - a.enrollment);
 
-            // 2. Render Function
             // 2. Render Function (Enhanced for Independent Filtering)
             window.statsState = { topN: 3, bottomN: 3 };
 
@@ -2326,8 +2327,7 @@
             // Initial render
             window.renderTopStats(3);
 
-
-            // Enrollment Table (Hierarchical)
+            // Enrollment Table (Optimized - Render only Districts initially)
             let enrollmentTableHtml = `
             <table id="enrollmentInteractiveTable">
                 <thead>
@@ -2339,7 +2339,7 @@
                         <th>% Growth</th>
                     </tr>
                 </thead>
-                <tbody>
+                <tbody id="enrollmentTableBody">
         `;
 
             const sortedDistricts = Object.keys(enrollmentStats).sort();
@@ -2352,7 +2352,7 @@
                 const distChange = distData.enrollment2025 - distData.enrollment2024;
 
                 enrollmentTableHtml += `
-                <tr class="district-row" onclick="toggleEnrollmentDistrict('${dist.replace(/'/g, "\\'")}')">
+                <tr class="district-row" id="row-enroll-dist-${dist.replace(/[^a-zA-Z0-9]/g, '_')}" onclick="toggleEnrollmentDistrict('${dist.replace(/'/g, "\\'")}')">
                     <td class="clickable-cell">
                         <div class="expandable-name">
                             <span class="expand-arrow" id="arrow-enroll-dist-${dist.replace(/[^a-zA-Z0-9]/g, '_')}"></span>
@@ -2369,9 +2369,30 @@
                     </span></td>
                 </tr>
             `;
+            }
 
-                // Block rows
+            enrollmentTableHtml += `</tbody></table>`;
+            document.getElementById('enrollmentTable').innerHTML = enrollmentTableHtml;
+        }
+
+        // Optimized Toggle Functions with Lazy Loading
+        function toggleEnrollmentDistrict(districtName) {
+            const districtId = districtName.replace(/[^a-zA-Z0-9]/g, '_');
+            const arrow = document.getElementById(`arrow-enroll-dist-${districtId}`);
+            const districtRow = document.getElementById(`row-enroll-dist-${districtId}`);
+
+            // Check if blocks are already rendered
+            const nextRow = districtRow.nextElementSibling;
+            const hasChildren = nextRow && nextRow.classList.contains(`enroll-district-${districtId}`);
+
+            const isExpanded = arrow.classList.contains('rotated');
+
+            if (!hasChildren && !isExpanded) {
+                // LAZY LOAD: Render blocks now
+                const distData = window.enrollmentStatsData[districtName];
                 const sortedBlocks = Object.keys(distData.blocks).sort();
+
+                let blockHtml = '';
                 for (const blk of sortedBlocks) {
                     const blockData = distData.blocks[blk];
                     const blockGrowth = blockData.enrollment2024 > 0
@@ -2379,11 +2400,11 @@
                         : 0;
                     const blockChange = blockData.enrollment2025 - blockData.enrollment2024;
 
-                    enrollmentTableHtml += `
-                    <tr class="block-row hidden-row enroll-district-${dist.replace(/[^a-zA-Z0-9]/g, '_')}" onclick="toggleEnrollmentBlock(event, '${dist.replace(/'/g, "\\'")}', '${blk.replace(/'/g, "\\'")}')">
+                    blockHtml += `
+                    <tr class="block-row enroll-district-${districtId}" id="row-enroll-block-${districtId}-${blk.replace(/[^a-zA-Z0-9]/g, '_')}" onclick="toggleEnrollmentBlock(event, '${districtName.replace(/'/g, "\\'")}', '${blk.replace(/'/g, "\\'")}')">
                         <td class="clickable-cell indent-1">
                             <div class="expandable-name">
-                                <span class="expand-arrow" id="arrow-enroll-block-${dist.replace(/[^a-zA-Z0-9]/g, '_')}-${blk.replace(/[^a-zA-Z0-9]/g, '_')}"></span>
+                                <span class="expand-arrow" id="arrow-enroll-block-${districtId}-${blk.replace(/[^a-zA-Z0-9]/g, '_')}"></span>
                                 <strong>${blk}</strong>
                             </div>
                         </td>
@@ -2395,102 +2416,100 @@
                         <td><span class="percentage-badge" style="background: ${blockGrowth >= 0 ? 'linear-gradient(45deg, #42e695, #3bb2b8)' : 'linear-gradient(45deg, #ff6b6b, #ee5a6f)'};">
                             ${blockGrowth >= 0 ? '+' : ''}${blockGrowth}%
                         </span></td>
-                    </tr>
-                `;
-
-                    // School rows
-                    const sortedSchools = Object.keys(blockData.schools).sort();
-                    for (const school of sortedSchools) {
-                        const schoolData = blockData.schools[school];
-                        const schoolGrowth = schoolData.enrollment2024 > 0
-                            ? ((schoolData.enrollment2025 - schoolData.enrollment2024) / schoolData.enrollment2024 * 100).toFixed(2)
-                            : 0;
-                        const schoolChange = schoolData.enrollment2025 - schoolData.enrollment2024;
-
-                        enrollmentTableHtml += `
-                        <tr class="school-row hidden-row enroll-block-${dist.replace(/[^a-zA-Z0-9]/g, '_')}-${blk.replace(/[^a-zA-Z0-9]/g, '_')}">
-                            <td class="indent-2">${school}</td>
-                            <td>${schoolData.enrollment2024.toLocaleString()}</td>
-                            <td>${schoolData.enrollment2025.toLocaleString()}</td>
-                            <td style="color: ${schoolChange >= 0 ? '#42e695' : '#ff6b6b'}; font-weight: 600;">
-                                ${schoolChange >= 0 ? '+' : ''}${schoolChange.toLocaleString()}
-                            </td>
-                            <td><span class="percentage-badge" style="background: ${schoolGrowth >= 0 ? 'linear-gradient(45deg, #42e695, #3bb2b8)' : 'linear-gradient(45deg, #ff6b6b, #ee5a6f)'};">
-                                ${schoolGrowth >= 0 ? '+' : ''}${schoolGrowth}%
-                            </span></td>
-                        </tr>
-                    `;
-                    }
+                    </tr>`;
                 }
-            }
 
-            enrollmentTableHtml += `</tbody></table>`;
-            document.getElementById('enrollmentTable').innerHTML = enrollmentTableHtml;
-        }
-
-        // Enrollment table toggle functions
-        function toggleEnrollmentDistrict(districtName) {
-            const districtId = districtName.replace(/[^a-zA-Z0-9]/g, '_');
-            const blockRows = document.querySelectorAll(`.enroll-district-${districtId}`);
-            const arrow = document.getElementById(`arrow-enroll-dist-${districtId}`);
-            const districtRow = arrow.closest('tr');
-
-            const isExpanded = !arrow.classList.contains('rotated');
-
-            if (isExpanded) {
+                // Insert after district row
+                districtRow.insertAdjacentHTML('afterend', blockHtml);
                 arrow.classList.add('rotated');
                 districtRow.classList.add('expanded');
-                blockRows.forEach(row => {
-                    row.classList.remove('hidden-row');
-                });
-            } else {
+
+            } else if (isExpanded) {
+                // Collapse
                 arrow.classList.remove('rotated');
                 districtRow.classList.remove('expanded');
-                blockRows.forEach(row => {
+
+                // Hide all children (Blocks AND Schools)
+                const allChildren = document.querySelectorAll(`.enroll-district-${districtId}`);
+                allChildren.forEach(row => {
                     row.classList.add('hidden-row');
                     const blockArrow = row.querySelector('.expand-arrow');
-                    if (blockArrow && blockArrow.classList.contains('rotated')) {
-                        blockArrow.classList.remove('rotated');
-                        row.classList.remove('expanded');
-                    }
+                    if (blockArrow) blockArrow.classList.remove('rotated');
                 });
 
                 const allSchoolRows = document.querySelectorAll(`[class*="enroll-block-${districtId}-"]`);
-                allSchoolRows.forEach(row => {
-                    if (row.classList.contains('school-row')) {
-                        row.classList.add('hidden-row');
-                    }
-                });
+                allSchoolRows.forEach(row => row.classList.add('hidden-row'));
+
+            } else {
+                // Just Expand (already rendered but hidden)
+                arrow.classList.add('rotated');
+                districtRow.classList.add('expanded');
+                const blockRows = document.querySelectorAll(`.enroll-district-${districtId}`);
+                blockRows.forEach(row => row.classList.remove('hidden-row'));
             }
         }
 
         function toggleEnrollmentBlock(event, districtName, blockName) {
             event.stopPropagation();
-
             const districtId = districtName.replace(/[^a-zA-Z0-9]/g, '_');
             const blockId = blockName.replace(/[^a-zA-Z0-9]/g, '_');
-            const schoolRows = document.querySelectorAll(`.enroll-block-${districtId}-${blockId}`);
+
             const arrow = document.getElementById(`arrow-enroll-block-${districtId}-${blockId}`);
-            const blockRow = arrow.closest('tr');
+            const blockRow = document.getElementById(`row-enroll-block-${districtId}-${blockId}`);
 
-            const isExpanded = !arrow.classList.contains('rotated');
+            // Check if schools are already rendered
+            const nextRow = blockRow.nextElementSibling;
+            const hasChildren = nextRow && nextRow.classList.contains(`enroll-block-${districtId}-${blockId}`);
 
-            if (isExpanded) {
+            const isExpanded = arrow.classList.contains('rotated');
+
+            if (!hasChildren && !isExpanded) {
+                // LAZY LOAD SCHOOLS
+                const distData = window.enrollmentStatsData[districtName];
+                const blockData = distData.blocks[blockName];
+                const sortedSchools = Object.keys(blockData.schools).sort();
+
+                let schoolHtml = '';
+                for (const school of sortedSchools) {
+                    const schoolData = blockData.schools[school];
+                    const schoolGrowth = schoolData.enrollment2024 > 0
+                        ? ((schoolData.enrollment2025 - schoolData.enrollment2024) / schoolData.enrollment2024 * 100).toFixed(2)
+                        : 0;
+                    const schoolChange = schoolData.enrollment2025 - schoolData.enrollment2024;
+
+                    schoolHtml += `
+                    <tr class="school-row enroll-block-${districtId}-${blockId}">
+                        <td class="indent-2">${school}</td>
+                        <td>${schoolData.enrollment2024.toLocaleString()}</td>
+                        <td>${schoolData.enrollment2025.toLocaleString()}</td>
+                        <td style="color: ${schoolChange >= 0 ? '#42e695' : '#ff6b6b'}; font-weight: 600;">
+                            ${schoolChange >= 0 ? '+' : ''}${schoolChange.toLocaleString()}
+                        </td>
+                        <td><span class="percentage-badge" style="background: ${schoolGrowth >= 0 ? 'linear-gradient(45deg, #42e695, #3bb2b8)' : 'linear-gradient(45deg, #ff6b6b, #ee5a6f)'};">
+                            ${schoolGrowth >= 0 ? '+' : ''}${schoolGrowth}%
+                        </span></td>
+                    </tr>`;
+                }
+
+                blockRow.insertAdjacentHTML('afterend', schoolHtml);
                 arrow.classList.add('rotated');
                 blockRow.classList.add('expanded');
-                schoolRows.forEach(row => {
-                    row.classList.remove('hidden-row');
-                });
-            } else {
+
+            } else if (isExpanded) {
+                // Collapse
                 arrow.classList.remove('rotated');
                 blockRow.classList.remove('expanded');
-                schoolRows.forEach(row => {
-                    row.classList.add('hidden-row');
-                });
+                const schoolRows = document.querySelectorAll(`.enroll-block-${districtId}-${blockId}`);
+                schoolRows.forEach(row => row.classList.add('hidden-row'));
+            } else {
+                // Expand existing
+                arrow.classList.add('rotated');
+                blockRow.classList.add('expanded');
+                const schoolRows = document.querySelectorAll(`.enroll-block-${districtId}-${blockId}`);
+                schoolRows.forEach(row => row.classList.remove('hidden-row'));
             }
         }
 
-        // Map functions - Dynamic state map generation
         function generateStateMap(districtStats, stateName) {
             // Update map title based on state
             const stateMapTitle = document.getElementById('stateMapTitle');
