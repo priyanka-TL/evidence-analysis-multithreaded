@@ -2200,10 +2200,26 @@
             allSchools.sort((a, b) => b.enrollment - a.enrollment);
 
             // 2. Render Function
-            window.renderTopStats = function (n) {
-                const topDistricts = allDistricts.slice(0, n);
-                const topBlocks = allBlocks.slice(0, n);
-                const topSchools = allSchools.slice(0, n);
+            // 2. Render Function (Enhanced for Independent Filtering)
+            window.statsState = { topN: 3, bottomN: 3 };
+
+            window.renderTopStats = function (n, type) {
+                // Update state if arguments provided
+                if (type === 'top') window.statsState.topN = parseInt(n);
+                if (type === 'bottom') window.statsState.bottomN = parseInt(n);
+
+                const topN = window.statsState.topN;
+                const bottomN = window.statsState.bottomN;
+
+                // Prepare sorted data for Top Performers (Descending)
+                const topDistricts = [...allDistricts].sort((a, b) => b.enrollment - a.enrollment).slice(0, topN);
+                const topBlocks = [...allBlocks].sort((a, b) => b.enrollment - a.enrollment).slice(0, topN);
+                const topSchools = [...allSchools].sort((a, b) => b.enrollment - a.enrollment).slice(0, topN);
+
+                // Prepare sorted data for Lowest Enrollment (Ascending)
+                const bottomDistricts = [...allDistricts].sort((a, b) => a.enrollment - b.enrollment).slice(0, bottomN);
+                const bottomBlocks = [...allBlocks].sort((a, b) => a.enrollment - b.enrollment).slice(0, bottomN);
+                const bottomSchools = [...allSchools].sort((a, b) => a.enrollment - b.enrollment).slice(0, bottomN);
 
                 const getGrowthBadge = (growth) => {
                     const color = growth >= 0 ? '#42e695' : '#ff6b6b';
@@ -2212,76 +2228,92 @@
                     return `<span style="background: ${bg}; color: ${color}; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: 600; margin-left: 8px;">${sign}${growth.toFixed(2)}%</span>`;
                 };
 
+                const getOptions = (selectedN) => {
+                    const options = [3, 5, 10, 25, 50, 100, 250];
+                    return options.map(val => `<option value="${val}" ${selectedN == val ? 'selected' : ''}>Show ${val}</option>`).join('');
+                };
+
+                const renderStatsGrid = (title, icon, colorTheme, districtData, blockData, schoolData, sectionType) => {
+                    const distColor = colorTheme === 'top' ? '#4facfe' : '#f6ad55';
+                    const blockColor = colorTheme === 'top' ? '#42e695' : '#f687b3';
+                    const schoolColor = colorTheme === 'top' ? '#f5576c' : '#805ad5';
+                    const currentN = sectionType === 'top' ? topN : bottomN;
+
+                    return `
+                    <div style="margin-top: 30px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                            <h3 style="color: #2d3748; margin-bottom: 0; font-size: 1.2em; display: flex; align-items: center;">
+                                <span style="margin-right: 10px;">${icon}</span> ${title}
+                            </h3>
+                            <select onchange="renderTopStats(this.value, '${sectionType}')" style="padding: 8px; border-radius: 6px; border: 1px solid #cbd5e0;">
+                                ${getOptions(currentN)}
+                            </select>
+                        </div>
+                        <div class="grid grid-3">
+                             <!-- Districts -->
+                            <div class="card" style="background: linear-gradient(135deg, #fff, #f8f9fa);">
+                                <h3 style="color: #4a5568; margin-bottom: 15px; font-size: 1.1em; border-bottom: 2px solid ${distColor}; padding-bottom: 10px;">🏙️ Districts</h3>
+                                <div style="display: flex; flex-direction: column; gap: 10px;">
+                                    ${districtData.map((d, i) => `
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: rgba(255, 255, 255, 0.8); border: 1px solid #e2e8f0; border-radius: 8px;">
+                                        <div>
+                                            <div style="font-weight: 600; color: #2d3748;">${i + 1}. ${d.name}</div>
+                                        </div>
+                                        <div style="text-align: right;">
+                                            <div style="font-weight: 700; color: ${distColor};">${d.enrollment.toLocaleString()}</div>
+                                            ${getGrowthBadge(d.growth)}
+                                        </div>
+                                    </div>`).join('')}
+                                </div>
+                            </div>
+
+                            <!-- Blocks -->
+                            <div class="card" style="background: linear-gradient(135deg, #fff, #f8f9fa);">
+                                <h3 style="color: #4a5568; margin-bottom: 15px; font-size: 1.1em; border-bottom: 2px solid ${blockColor}; padding-bottom: 10px;">🏘️ Blocks</h3>
+                                <div style="display: flex; flex-direction: column; gap: 10px;">
+                                    ${blockData.map((b, i) => `
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: rgba(255, 255, 255, 0.8); border: 1px solid #e2e8f0; border-radius: 8px;">
+                                        <div>
+                                            <div style="font-weight: 600; color: #2d3748;">${i + 1}. ${b.name}</div>
+                                            <div style="font-size: 0.75em; color: #718096;">${b.district}</div>
+                                        </div>
+                                        <div style="text-align: right;">
+                                            <div style="font-weight: 700; color: ${blockColor};">${b.enrollment.toLocaleString()}</div>
+                                            ${getGrowthBadge(b.growth)}
+                                        </div>
+                                    </div>`).join('')}
+                                </div>
+                            </div>
+
+                            <!-- Schools -->
+                            <div class="card" style="background: linear-gradient(135deg, #fff, #f8f9fa);">
+                                <h3 style="color: #4a5568; margin-bottom: 15px; font-size: 1.1em; border-bottom: 2px solid ${schoolColor}; padding-bottom: 10px;">🎓 Schools</h3>
+                                <div style="display: flex; flex-direction: column; gap: 10px;">
+                                    ${schoolData.map((s, i) => `
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: rgba(255, 255, 255, 0.8); border: 1px solid #e2e8f0; border-radius: 8px;">
+                                        <div>
+                                            <div style="font-weight: 600; color: #2d3748;">${i + 1}. ${s.name}</div>
+                                            <div style="font-size: 0.75em; color: #718096;">${s.block}</div>
+                                        </div>
+                                        <div style="text-align: right;">
+                                            <div style="font-weight: 700; color: ${schoolColor};">${s.enrollment.toLocaleString()}</div>
+                                            ${getGrowthBadge(s.growth)}
+                                        </div>
+                                    </div>`).join('')}
+                                </div>
+                            </div>
+                        </div>
+                    </div>`;
+                };
+
+                const topHtml = renderStatsGrid("Top Performers (By Enrollment)", "🏆", "top", topDistricts, topBlocks, topSchools, "top");
+                const bottomHtml = renderStatsGrid("Lowest Enrollment Areas", "📉", "bottom", bottomDistricts, bottomBlocks, bottomSchools, "bottom");
+
                 const html = `
                 <div class="chart-container" id="topStatsContainer">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                        <div class="chart-title" style="margin-bottom: 0; text-align: left;">🏆 Top Performers (By Enrollment)</div>
-                        <select id="topNSelector" onchange="renderTopStats(this.value)" style="padding: 8px; border-radius: 6px; border: 1px solid #cbd5e0;">
-                            <option value="3" ${n == 3 ? 'selected' : ''}>Top 3</option>
-                            <option value="5" ${n == 5 ? 'selected' : ''}>Top 5</option>
-                            <option value="10" ${n == 10 ? 'selected' : ''}>Top 10</option>
-                        </select>
-                    </div>
-
-                    <div class="grid grid-3">
-                         <!-- Top Districts -->
-                        <div class="card" style="background: linear-gradient(135deg, #fff, #f8f9fa);">
-                            <h3 style="color: #4a5568; margin-bottom: 15px; font-size: 1.1em; border-bottom: 2px solid #4facfe; padding-bottom: 10px;">🏙️ Top Districts</h3>
-                            <div style="display: flex; flex-direction: column; gap: 10px;">
-                                ${topDistricts.map((d, i) => `
-                                <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: rgba(255, 255, 255, 0.8); border: 1px solid #e2e8f0; border-radius: 8px;">
-                                    <div>
-                                        <div style="font-weight: 600; color: #2d3748;">${i + 1}. ${d.name}</div>
-                                    </div>
-                                    <div style="text-align: right;">
-                                        <div style="font-weight: 700; color: #4facfe;">${d.enrollment.toLocaleString()}</div>
-                                        ${getGrowthBadge(d.growth)}
-                                    </div>
-                                </div>`).join('')}
-                            </div>
-                        </div>
-
-                        <!-- Top Blocks -->
-                        <div class="card" style="background: linear-gradient(135deg, #fff, #f8f9fa);">
-                            <h3 style="color: #4a5568; margin-bottom: 15px; font-size: 1.1em; border-bottom: 2px solid #42e695; padding-bottom: 10px;">🏘️ Top Blocks</h3>
-                            <div style="display: flex; flex-direction: column; gap: 10px;">
-                                ${topBlocks.map((b, i) => `
-                                <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: rgba(255, 255, 255, 0.8); border: 1px solid #e2e8f0; border-radius: 8px;">
-                                    <div>
-                                        <div style="font-weight: 600; color: #2d3748;">${i + 1}. ${b.name}</div>
-                                        <div style="font-size: 0.75em; color: #718096;">${b.district}</div>
-                                    </div>
-                                    <div style="text-align: right;">
-                                        <div style="font-weight: 700; color: #42e695;">${b.enrollment.toLocaleString()}</div>
-                                        ${getGrowthBadge(b.growth)}
-                                    </div>
-                                </div>`).join('')}
-                            </div>
-                        </div>
-
-                        <!-- Top Schools -->
-                        <div class="card" style="background: linear-gradient(135deg, #fff, #f8f9fa);">
-                            <h3 style="color: #4a5568; margin-bottom: 15px; font-size: 1.1em; border-bottom: 2px solid #f5576c; padding-bottom: 10px;">🎓 Top Schools</h3>
-                            <div style="display: flex; flex-direction: column; gap: 10px;">
-                                ${topSchools.map((s, i) => `
-                                <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: rgba(255, 255, 255, 0.8); border: 1px solid #e2e8f0; border-radius: 8px;">
-                                    <div>
-                                        <div style="font-weight: 600; color: #2d3748;">${i + 1}. ${s.name}</div>
-                                        <div style="font-size: 0.75em; color: #718096;">${s.block}</div>
-                                    </div>
-                                    <div style="text-align: right;">
-                                        <div style="font-weight: 700; color: #f5576c;">${s.enrollment.toLocaleString()}</div>
-                                        ${getGrowthBadge(s.growth)}
-                                    </div>
-                                </div>`).join('')}
-                            </div>
-                        </div>
-                    </div>
+                    ${topHtml}
+                    ${bottomHtml}
                 </div>`;
-
-                // Remove existing container if any (for re-renders) to avoid duplicates if specific ID logic wasn't used, 
-                // but simpler to just replace innerHTML of a wrapper or insertAfter. 
-                // Since we are inserting after chart, we can give the rendered HTML a container ID and check if it exists.
 
                 const existing = document.getElementById('topStatsContainer');
                 if (existing) {
@@ -2293,6 +2325,7 @@
 
             // Initial render
             window.renderTopStats(3);
+
 
             // Enrollment Table (Hierarchical)
             let enrollmentTableHtml = `
