@@ -1488,7 +1488,8 @@
                 for (const k of sortedSG) {
                     const [s, g] = k.split("_");
                     const r = relSG[k];
-                    const relevantPercent = r.total > 0 ? ((r.Relevant / r.total) * 100).toFixed(1) : 0;
+                    const relevantScore_sg = r.Relevant + (r["Partially Relevant"] * 0.5);
+                    const relevantPercent = r.total > 0 ? ((relevantScore_sg / r.total) * 100).toFixed(1) : 0;
                     relSGHtml += `
                     <tr>
                         <td>${s}</td>
@@ -1652,7 +1653,8 @@
 
             for (const dist of sortedDistricts) {
                 const distData = hierarchicalData[dist];
-                const distRelevantPercent = distData.total > 0 ? ((distData.Relevant / distData.total) * 100).toFixed(1) : 0;
+                const relevantScore_dist = distData.Relevant + (distData["Partially Relevant"] * 0.5);
+                const distRelevantPercent = distData.total > 0 ? ((relevantScore_dist / distData.total) * 100).toFixed(1) : 0;
                 const blockCount = Object.keys(distData.blocks).length;
                 const schoolCount = new Set(
                     Object.values(distData.blocks).flatMap(b => Object.keys(b.schools))
@@ -1680,7 +1682,8 @@
                 const sortedBlocks = Object.keys(distData.blocks).sort();
                 for (const blk of sortedBlocks) {
                     const blockData = distData.blocks[blk];
-                    const blockRelevantPercent = blockData.total > 0 ? ((blockData.Relevant / blockData.total) * 100).toFixed(1) : 0;
+                    const relevantScore_block = blockData.Relevant + (blockData["Partially Relevant"] * 0.5);
+                    const blockRelevantPercent = blockData.total > 0 ? ((relevantScore_block / blockData.total) * 100).toFixed(1) : 0;
                     const blockSchoolCount = Object.keys(blockData.schools).length;
 
                     distHtml += `
@@ -1704,7 +1707,8 @@
                     const sortedSchools = Object.keys(blockData.schools).sort();
                     for (const school of sortedSchools) {
                         const schoolData = blockData.schools[school];
-                        const schoolRelevantPercent = schoolData.total > 0 ? ((schoolData.Relevant / schoolData.total) * 100).toFixed(1) : 0;
+                        const relevantScore_school = schoolData.Relevant + (schoolData["Partially Relevant"] * 0.5);
+                        const schoolRelevantPercent = schoolData.total > 0 ? ((relevantScore_school / schoolData.total) * 100).toFixed(1) : 0;
 
                         distHtml += `
                         <tr class="school-row hidden-row block-${dist.replace(/[^a-zA-Z0-9]/g, '_')}-${blk.replace(/[^a-zA-Z0-9]/g, '_')}">
@@ -2762,7 +2766,8 @@
                 const matchedDistrict = Object.keys(districtStats).find(key => key.toLowerCase().trim() === districtName.toLowerCase().trim());
                 if (matchedDistrict) {
                     const stats = districtStats[matchedDistrict];
-                    const percentage = stats.total > 0 ? ((stats.Relevant / stats.total) * 100).toFixed(1) : 0;
+                    const relevantScore = stats.Relevant + (stats["Partially Relevant"] * 0.5);
+                    const percentage = stats.total > 0 ? ((relevantScore / stats.total) * 100).toFixed(1) : 0;
                     color = getColorForPercentage(parseFloat(percentage));
                     tooltipText = `${districtName}\n${percentage}% Relevant\nTotal: ${stats.total}\nRelevant: ${stats.Relevant}\nPartially: ${stats["Partially Relevant"]}\nIrrelevant: ${stats.Irrelevant}`;
                 }
@@ -2839,7 +2844,8 @@
                 const matchedDistrict = Object.keys(districtStats || {}).find(key => key.toLowerCase().trim() === districtName.toLowerCase().trim());
                 if (matchedDistrict) {
                     const stats = districtStats[matchedDistrict];
-                    const percentage = stats.total > 0 ? ((stats.Relevant / stats.total) * 100).toFixed(1) : 0;
+                    const relevantScore = stats.Relevant + (stats["Partially Relevant"] * 0.5);
+                    const percentage = stats.total > 0 ? ((relevantScore / stats.total) * 100).toFixed(1) : 0;
                     color = getColorForPercentage(parseFloat(percentage));
                     tooltipText = `${districtName}\n${percentage}% Relevant\nTotal: ${stats.total}\nRelevant: ${stats.Relevant}\nPartially: ${stats["Partially Relevant"]}\nIrrelevant: ${stats.Irrelevant}`;
                 }

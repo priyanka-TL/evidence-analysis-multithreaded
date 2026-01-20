@@ -34,6 +34,16 @@ FINAL_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "merged_output_1.csv")
 # === STATE CONFIGURATION (from .env) ===
 STATE_NAME = os.getenv("STATE_NAME", "HARYANA")  # Default: HARYANA
 
+# === RELEVANCE SCORING CONFIGURATION ===
+# BIHAR: Use "strict" mode (YES/NO answers only, descriptive content ignored)
+# HARYANA: Use "mixed" mode (considers both YES/NO and descriptive quality)
+# Options: "strict" (Bihar), "mixed" (Haryana), "descriptive" (only descriptive)
+RELEVANCE_MODE = os.getenv("RELEVANCE_MODE", "mixed")  # Default: mixed for Haryana
+
+# Thresholds for relevance scoring (configurable per state)
+RELEVANT_THRESHOLD = float(os.getenv("RELEVANT_THRESHOLD", "0.7"))  # Score >= 0.7 = Relevant
+PARTIALLY_RELEVANT_THRESHOLD = float(os.getenv("PARTIALLY_RELEVANT_THRESHOLD", "0.4"))  # Score >= 0.4 = Partially Relevant
+
 # === ANSWER FORMAT CONFIGURATION ===
 # Set to True for descriptive answers, False for YES/NO answers
 USE_DESCRIPTIVE_ANSWERS = os.getenv("USE_DESCRIPTIVE_ANSWERS", True)
@@ -407,10 +417,22 @@ def validate_and_fix_enrollment_data(enr_2024, enr_2025, enr_pct, answers_text, 
     return enr_2024, enr_2025, enr_pct
 
 # === Utility functions ===
-def calculate_relevance_tag(answers):
+def calculate_relevance_tag(answers, mode=None):
     """
-    Calculate relevance tag based on answers.
-    Handles YES/NO answers, descriptive answers, and mixed combinations.
+    Calculate relevance tag based on answers with configurable scoring modes.
+    
+    Args:
+        answers: List of answer strings from Gemini API
+        mode: Scoring mode - "strict" (Bihar), "mixed" (Haryana), "descriptive" (only descriptive)
+              If None, uses global RELEVANCE_MODE setting
+    
+    Modes:
+        - "strict": Only YES/NO answers matter, descriptive content ignored (for Bihar)
+        - "mixed": Both YES/NO and descriptive answers contribute (for Haryana)
+        - "descriptive": Only descriptive answers matter, YES/NO ignored
+    
+    Returns:
+        str: 'Relevant', 'Partially Relevant', or 'Irrelevant'
     """
     if not answers or not isinstance(answers, list):
         return 'Irrelevant'
@@ -418,6 +440,10 @@ def calculate_relevance_tag(answers):
     total_answers = len(answers)
     if total_answers == 0:
         return 'Irrelevant'
+
+    # Use global mode if not specified
+    if mode is None:
+        mode = RELEVANCE_MODE
 
     yes_no_answers = []
     descriptive_answers = []
@@ -464,28 +490,63 @@ def calculate_relevance_tag(answers):
 
         descriptive_score = total_desc_score / len(descriptive_answers)
 
-    # Combine scores based on answer type distribution
-    if yes_no_answers and descriptive_answers:
-        # Mixed answers - weighted average based on count
-        yes_no_weight = len(yes_no_answers) / total_answers
-        descriptive_weight = len(descriptive_answers) / total_answers
-        combined_score = (yes_no_score * yes_no_weight) + (descriptive_score * descriptive_weight)
-    elif yes_no_answers:
-        # Only YES/NO answers
-        combined_score = yes_no_score
-    elif descriptive_answers:
-        # Only descriptive answers
-        combined_score = descriptive_score
-    else:
-        return 'Irrelevant'
+    # ============================================================
+    # MODE-SPECIFIC SCORING LOGIC
+    # ============================================================
+    
+    if mode == "strict":
+        # BIHAR MODE: Only YES/NO answers count
+        # Descriptive content is completely ignored
+        if yes_no_answers:
+            combined_score = yes_no_score
+            logging.debug(f"[Relevance-Strict] YES/NO only: {yes_no_score:.2f} (YES: {sum(1 for a in yes_no_answers if a == 'YES')}/{len(yes_no_answers)})")
+        else:
+            # No YES/NO answers in strict mode = Irrelevant
+            combined_score = 0
+            logging.debug(f"[Relevance-Strict] No YES/NO answers found, marking as Irrelevant")
+    
+    elif mode == "descriptive":
+        # DESCRIPTIVE MODE: Only descriptive answers count
+        # YES/NO answers are ignored
+        if descriptive_answers:
+            combined_score = descriptive_score
+            logging.debug(f"[Relevance-Descriptive] Descriptive only: {descriptive_score:.2f}")
+        else:
+            # No descriptive answers = Irrelevant
+            combined_score = 0
+            logging.debug(f"[Relevance-Descriptive] No descriptive answers found, marking as Irrelevant")
+    
+    else:  # mode == "mixed" (default for Haryana)
+        # MIXED MODE: Both YES/NO and descriptive answers contribute
+        if yes_no_answers and descriptive_answers:
+            # Case 1: Mixed answers - weighted average based on count
+            yes_no_weight = len(yes_no_answers) / total_answers
+            descriptive_weight = len(descriptive_answers) / total_answers
+            combined_score = (yes_no_score * yes_no_weight) + (descriptive_score * descriptive_weight)
+            logging.debug(f"[Relevance-Mixed] YES/NO: {yes_no_score:.2f} (weight: {yes_no_weight:.2f}), Descriptive: {descriptive_score:.2f} (weight: {descriptive_weight:.2f}), Combined: {combined_score:.2f}")
+        elif yes_no_answers:
+            # Case 2: Only YES/NO answers
+            combined_score = yes_no_score
+            logging.debug(f"[Relevance-Mixed] YES/NO only: {combined_score:.2f}")
+        elif descriptive_answers:
+            # Case 3: Only descriptive answers
+            combined_score = descriptive_score
+            logging.debug(f"[Relevance-Mixed] Descriptive only: {combined_score:.2f}")
+        else:
+            # No valid answers
+            combined_score = 0
+            logging.debug(f"[Relevance-Mixed] No valid answers found")
 
-    # Determine relevance tag based on combined score
-    if combined_score >= 0.7:
-        return 'Relevant'
-    elif combined_score >= 0.4:
-        return 'Partially Relevant'
+    # Determine relevance tag based on combined score and configurable thresholds
+    if combined_score >= RELEVANT_THRESHOLD:
+        tag = 'Relevant'
+    elif combined_score >= PARTIALLY_RELEVANT_THRESHOLD:
+        tag = 'Partially Relevant'
     else:
-        return 'Irrelevant'
+        tag = 'Irrelevant'
+    
+    logging.debug(f"[Relevance-{mode.upper()}] Final score: {combined_score:.2f} → Tag: {tag}")
+    return tag
 
 def adjust_excel_formatting(output_file):
     # This function is for .xlsx, but the script now saves .csv
@@ -565,11 +626,20 @@ def process_image(task_evidence_link, task_evidence_question, task_name=None, ma
 
 {task_evidence_question}
 
-For each question, you can provide either:
-1. A clear YES or NO answer with brief reasoning, OR
-2. A detailed, descriptive answer that thoroughly explains what you observe
+IMPORTANT RESPONSE FORMAT:
+- For each question, provide EXACTLY ONE answer in the "answers" array
+- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
+- The answer can be either:
+  1. A clear YES or NO
+  2. A detailed descriptive answer (e.g., "The school has organized activities...")
 
-Choose the response format that best fits the question and provides the most valuable assessment of the evidence.
+Example for 1 question:
+{{
+  "answers": ["YES"],  // or ["The enrollment increased from 120 to 144"]
+  "reasonings": ["The image clearly shows enrollment data with increasing trend"]
+}}
+
+DO NOT put both YES/NO and explanation in the answers array!
 
 Focus on:
 - Visual evidence in the image
@@ -581,6 +651,34 @@ Focus on:
             selected_model = model
             if is_enrollment_task:
                 selected_model = enrollment_model
+                # Update the example to show enrollment fields
+                prompt = f"""You are an educational evidence validator. Analyze the given image and answer these questions:
+
+{task_evidence_question}
+
+IMPORTANT RESPONSE FORMAT:
+- For each question, provide EXACTLY ONE answer in the "answers" array
+- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
+- The answer can be either:
+  1. A clear YES or NO
+  2. A detailed descriptive answer (e.g., "The school has organized activities...")
+
+Example for 1 question with enrollment data:
+{{
+  "answers": ["20%"],
+  "reasonings": ["The image clearly shows enrollment data with increasing trend"],
+  "enrollment_2024": 120,
+  "enrollment_2025": 144,
+  "enrollment_increase_percentage": 20.0
+}}
+
+DO NOT put both YES/NO and explanation in the answers array!
+
+Focus on:
+- Visual evidence in the image
+- Relevance to the question
+- Quality and clarity of the evidence
+- Educational context and completeness"""
                 prompt += """
 
 ====================================================================================
@@ -780,9 +878,20 @@ def process_pdf(task_evidence_link, task_evidence_question, task_name=None, max_
 
 {task_evidence_question}
 
-For each question, you can provide either:
-1. A clear YES or NO answer with brief reasoning, OR
-2. A detailed, descriptive answer that thoroughly explains what you observe
+IMPORTANT RESPONSE FORMAT:
+- For each question, provide EXACTLY ONE answer in the "answers" array
+- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
+- The answer can be either:
+  1. A clear YES or NO
+  2. A detailed descriptive answer (e.g., "The school has organized activities...")
+
+Example for 1 question:
+{{
+  "answers": ["YES"],  // or ["The enrollment increased from 120 to 144"]
+  "reasonings": ["The document clearly shows enrollment data with increasing trend"]
+}}
+
+DO NOT put both YES/NO and explanation in the answers array!
 
 Focus on:
 - Content evidence in the document
@@ -793,6 +902,34 @@ Focus on:
             selected_model = model
             if is_enrollment_task:
                 selected_model = enrollment_model
+                # Update the example to show enrollment fields
+                prompt = f"""You are an educational evidence validator. Analyze the given PDF document and answer these questions:
+
+{task_evidence_question}
+
+IMPORTANT RESPONSE FORMAT:
+- For each question, provide EXACTLY ONE answer in the "answers" array
+- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
+- The answer can be either:
+  1. A clear YES or NO
+  2. A detailed descriptive answer (e.g., "The school has organized activities...")
+
+Example for 1 question with enrollment data:
+{{
+  "answers": ["20%"],
+  "reasonings": ["The document clearly shows enrollment data with increasing trend"],
+  "enrollment_2024": 120,
+  "enrollment_2025": 144,
+  "enrollment_increase_percentage": 20.0
+}}
+
+DO NOT put both YES/NO and explanation in the answers array!
+
+Focus on:
+- Content evidence in the document
+- Relevance to the question
+- Quality and clarity of the evidence
+- Educational context and completeness"""
                 prompt += ENROLLMENT_PROMPT_SUFFIX
             
             response = selected_model.generate_content([
@@ -847,9 +984,20 @@ def process_excel(task_evidence_link, task_evidence_question, task_name=None, ma
 EXCEL DATA:
 {excel_text[:10000]}
 
-For each question, you can provide either:
-1. A clear YES or NO answer with brief reasoning, OR
-2. A detailed, descriptive answer that thoroughly explains what you observe
+IMPORTANT RESPONSE FORMAT:
+- For each question, provide EXACTLY ONE answer in the "answers" array
+- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
+- The answer can be either:
+  1. A clear YES or NO
+  2. A detailed descriptive answer (e.g., "The enrollment increased from 120 to 144")
+
+Example for 1 question:
+{{
+  "answers": ["YES"],  // or ["The data shows increasing enrollment trend"]
+  "reasonings": ["The spreadsheet clearly shows enrollment data with upward trend"]
+}}
+
+DO NOT put both YES/NO and explanation in the answers array!
 
 Focus on:
 - Data evidence in the spreadsheet
@@ -860,6 +1008,37 @@ Focus on:
             selected_model = model
             if is_enrollment_task:
                 selected_model = enrollment_model
+                # Update the example to show enrollment fields
+                prompt = f"""You are an educational evidence validator. Analyze the following Excel spreadsheet data and answer these questions:
+
+{task_evidence_question}
+
+EXCEL DATA:
+{excel_text[:10000]}
+
+IMPORTANT RESPONSE FORMAT:
+- For each question, provide EXACTLY ONE answer in the "answers" array
+- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
+- The answer can be either:
+  1. A clear YES or NO
+  2. A detailed descriptive answer (e.g., "The enrollment increased from 120 to 144")
+
+Example for 1 question with enrollment data:
+{{
+  "answers": ["20%"],
+  "reasonings": ["The spreadsheet clearly shows enrollment data with upward trend"],
+  "enrollment_2024": 120,
+  "enrollment_2025": 144,
+  "enrollment_increase_percentage": 20.0
+}}
+
+DO NOT put both YES/NO and explanation in the answers array!
+
+Focus on:
+- Data evidence in the spreadsheet
+- Relevance to the question
+- Quality and completeness of the data
+- Educational context"""
                 prompt += ENROLLMENT_PROMPT_SUFFIX
             
             response = selected_model.generate_content([prompt])
@@ -1116,6 +1295,17 @@ if __name__ == "__main__":
     ]
 
     logging.info(f"[Main] Found {len(input_files)} input files to process.")
+    
+    # Log relevance scoring configuration
+    logging.info(f"[Main] ===== RELEVANCE SCORING CONFIGURATION =====")
+    logging.info(f"[Main] State: {STATE_NAME}")
+    logging.info(f"[Main] Relevance Mode: {RELEVANCE_MODE}")
+    logging.info(f"[Main]   - 'strict': Only YES/NO answers (Bihar)")
+    logging.info(f"[Main]   - 'mixed': Both YES/NO and descriptive (Haryana)")
+    logging.info(f"[Main]   - 'descriptive': Only descriptive answers")
+    logging.info(f"[Main] Relevant Threshold: >= {RELEVANT_THRESHOLD}")
+    logging.info(f"[Main] Partially Relevant Threshold: >= {PARTIALLY_RELEVANT_THRESHOLD}")
+    logging.info(f"[Main] ===============================================")
     
     # 🆕 Log extra keys configuration
     if ENABLE_EXTRA_KEYS:
