@@ -18,7 +18,7 @@ load_dotenv()
 INPUT_FILE = "../pre-processor/parallel_output_split_1_files/merged_output_1.csv"  # Your merged output file
 OUTPUT_FILE = "../pre-processor/parallel_output_split_1_files/enhanced_merged_output_1.csv"  # Output with enrollment data
 HIERARCHY_FILE = "enrollment_hierarchy.json"  # Hierarchical enrollment data
-HTML_OUTPUT = "../webpage/home.html"  # HTML dashboard output
+HTML_OUTPUT = "../webpage/report.html"  # HTML dashboard output
 
 # ==== STATE CONFIGURATION (from .env) ====
 STATE_NAME = os.getenv("STATE_NAME", "HARYANA")
@@ -127,6 +127,7 @@ def build_hierarchy(df):
                     '_children': {},
                     '_evidence_count': 0,
                     '_relevant_count': 0,
+                    '_relevant_score': 0.0,  # Weighted score for relevance
                     '_schools': set(),
                     '_enrollment_numbers': [],
                     '_uuid': row.get('UUID', 'N/A'),
@@ -137,10 +138,15 @@ def build_hierarchy(df):
             # Update counts
             current_level[value]['_evidence_count'] += 1
             
-            # Track relevance
+            # Track relevance with weighted scoring
+            # Relevant = 1.0, Partially Relevant = 0.5, Irrelevant = 0.0
             relevance = row.get('Relevance Tag', '')
             if relevance == 'Relevant':
                 current_level[value]['_relevant_count'] += 1
+                current_level[value]['_relevant_score'] += 1.0
+            elif relevance == 'Partially Relevant':
+                current_level[value]['_relevant_count'] += 0.5  # Half count
+                current_level[value]['_relevant_score'] += 0.5
             
             # Track schools
             if level_name == 'School Name':
@@ -228,7 +234,9 @@ def flatten_hierarchy(hierarchy_dict, parent_path=None):
                 'Name': key,
                 'Full_Path': ' > '.join(current_path),
                 'Evidence_Count': data['_evidence_count'],
-                'Relevant_Count': data['_relevant_count'],
+                'Relevant_Count': round(data['_relevant_count'], 2),  # Can be decimal now
+                'Relevant_Score': round(data['_relevant_score'], 2),  # Weighted score
+                'Relevance_Percentage': round((data['_relevant_score'] / data['_evidence_count'] * 100) if data['_evidence_count'] > 0 else 0, 1),
                 'School_Count': data['_school_count'],
                 'Avg_Enrollment': round(data['_avg_enrollment'], 2),
                 'Total_Enrollment': data['_total_enrollment'],
@@ -395,10 +403,10 @@ for _, row in district_summary.iterrows():
 # Schools needing attention (low relevant evidence)
 print(f"\n⚠️  SCHOOLS NEEDING ATTENTION:")
 school_summary = summary_df[summary_df['Level'] == 'School Name']
-low_relevance = school_summary[school_summary['Relevant_Count'] < school_summary['Evidence_Count'] * 0.3]
+low_relevance = school_summary[school_summary['Relevant_Score'] < school_summary['Evidence_Count'] * 0.3]
 for _, row in low_relevance.head(5).iterrows():
-    relevance_pct = (row['Relevant_Count'] / row['Evidence_Count'] * 100) if row['Evidence_Count'] > 0 else 0
-    print(f"   • {row['Name']}: {relevance_pct:.1f}% relevant ({row['Relevant_Count']}/{row['Evidence_Count']})")
+    relevance_pct = (row['Relevant_Score'] / row['Evidence_Count'] * 100) if row['Evidence_Count'] > 0 else 0
+    print(f"   • {row['Name']}: {relevance_pct:.1f}% relevant (Score: {row['Relevant_Score']}/{row['Evidence_Count']})")
 
 print(f"\n💾 OUTPUT FILES:")
 print(f"   • Enhanced data: {OUTPUT_FILE}")
