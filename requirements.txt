@@ -6,3 +6,4 @@ google-generativeai
 typing-extensions
 python-dotenv
 tqdm
+psycopg2-binary
