@@ -14,6 +14,7 @@ from urllib.request import urlopen
 import re
 import logging
 import csv
+import io  # For BytesIO when processing Excel files from URLs
 from dotenv import load_dotenv
 load_dotenv()
 import threading
@@ -22,6 +23,9 @@ from collections import deque
 
 # === Constants ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+PDF_FORMATS = {".pdf"}
+EXCEL_FORMATS = {".xlsx", ".xls"}
+ALL_VALID_FORMATS = IMAGE_FORMATS | PDF_FORMATS | EXCEL_FORMATS
 MAX_PROCESSED_ROWS = 520
 INPUT_DIR = "../pre-processor/parallel_input_split_1_files"
 OUTPUT_DIR = "../pre-processor/parallel_output_split_1_files"
@@ -30,9 +34,19 @@ FINAL_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "merged_output_1.csv")
 # === STATE CONFIGURATION (from .env) ===
 STATE_NAME = os.getenv("STATE_NAME", "HARYANA")  # Default: HARYANA
 
+# === RELEVANCE SCORING CONFIGURATION ===
+# BIHAR: Use "strict" mode (YES/NO answers only, descriptive content ignored)
+# HARYANA: Use "mixed" mode (considers both YES/NO and descriptive quality)
+# Options: "strict" (Bihar), "mixed" (Haryana), "descriptive" (only descriptive)
+RELEVANCE_MODE = os.getenv("RELEVANCE_MODE", "mixed")  # Default: mixed for Haryana
+
+# Thresholds for relevance scoring (configurable per state)
+RELEVANT_THRESHOLD = float(os.getenv("RELEVANT_THRESHOLD", "0.7"))  # Score >= 0.7 = Relevant
+PARTIALLY_RELEVANT_THRESHOLD = float(os.getenv("PARTIALLY_RELEVANT_THRESHOLD", "0.4"))  # Score >= 0.4 = Partially Relevant
+
 # === ANSWER FORMAT CONFIGURATION ===
 # Set to True for descriptive answers, False for YES/NO answers
-USE_DESCRIPTIVE_ANSWERS = True
+USE_DESCRIPTIVE_ANSWERS = os.getenv("USE_DESCRIPTIVE_ANSWERS", True)
 
 # ==== 🆕 ENROLLMENT CONFIGURATION ====
 # Configure which task should be processed for enrollment data (loaded from .env)
@@ -403,10 +417,22 @@ def validate_and_fix_enrollment_data(enr_2024, enr_2025, enr_pct, answers_text, 
     return enr_2024, enr_2025, enr_pct
 
 # === Utility functions ===
-def calculate_relevance_tag(answers):
+def calculate_relevance_tag(answers, mode=None):
     """
-    Calculate relevance tag based on answers.
-    Handles YES/NO answers, descriptive answers, and mixed combinations.
+    Calculate relevance tag based on answers with configurable scoring modes.
+    
+    Args:
+        answers: List of answer strings from Gemini API
+        mode: Scoring mode - "strict" (Bihar), "mixed" (Haryana), "descriptive" (only descriptive)
+              If None, uses global RELEVANCE_MODE setting
+    
+    Modes:
+        - "strict": Only YES/NO answers matter, descriptive content ignored (for Bihar)
+        - "mixed": Both YES/NO and descriptive answers contribute (for Haryana)
+        - "descriptive": Only descriptive answers matter, YES/NO ignored
+    
+    Returns:
+        str: 'Relevant', 'Partially Relevant', or 'Irrelevant'
     """
     if not answers or not isinstance(answers, list):
         return 'Irrelevant'
@@ -414,6 +440,10 @@ def calculate_relevance_tag(answers):
     total_answers = len(answers)
     if total_answers == 0:
         return 'Irrelevant'
+
+    # Use global mode if not specified
+    if mode is None:
+        mode = RELEVANCE_MODE
 
     yes_no_answers = []
     descriptive_answers = []
@@ -460,28 +490,63 @@ def calculate_relevance_tag(answers):
 
         descriptive_score = total_desc_score / len(descriptive_answers)
 
-    # Combine scores based on answer type distribution
-    if yes_no_answers and descriptive_answers:
-        # Mixed answers - weighted average based on count
-        yes_no_weight = len(yes_no_answers) / total_answers
-        descriptive_weight = len(descriptive_answers) / total_answers
-        combined_score = (yes_no_score * yes_no_weight) + (descriptive_score * descriptive_weight)
-    elif yes_no_answers:
-        # Only YES/NO answers
-        combined_score = yes_no_score
-    elif descriptive_answers:
-        # Only descriptive answers
-        combined_score = descriptive_score
-    else:
-        return 'Irrelevant'
+    # ============================================================
+    # MODE-SPECIFIC SCORING LOGIC
+    # ============================================================
+    
+    if mode == "strict":
+        # BIHAR MODE: Only YES/NO answers count
+        # Descriptive content is completely ignored
+        if yes_no_answers:
+            combined_score = yes_no_score
+            logging.debug(f"[Relevance-Strict] YES/NO only: {yes_no_score:.2f} (YES: {sum(1 for a in yes_no_answers if a == 'YES')}/{len(yes_no_answers)})")
+        else:
+            # No YES/NO answers in strict mode = Irrelevant
+            combined_score = 0
+            logging.debug(f"[Relevance-Strict] No YES/NO answers found, marking as Irrelevant")
+    
+    elif mode == "descriptive":
+        # DESCRIPTIVE MODE: Only descriptive answers count
+        # YES/NO answers are ignored
+        if descriptive_answers:
+            combined_score = descriptive_score
+            logging.debug(f"[Relevance-Descriptive] Descriptive only: {descriptive_score:.2f}")
+        else:
+            # No descriptive answers = Irrelevant
+            combined_score = 0
+            logging.debug(f"[Relevance-Descriptive] No descriptive answers found, marking as Irrelevant")
+    
+    else:  # mode == "mixed" (default for Haryana)
+        # MIXED MODE: Both YES/NO and descriptive answers contribute
+        if yes_no_answers and descriptive_answers:
+            # Case 1: Mixed answers - weighted average based on count
+            yes_no_weight = len(yes_no_answers) / total_answers
+            descriptive_weight = len(descriptive_answers) / total_answers
+            combined_score = (yes_no_score * yes_no_weight) + (descriptive_score * descriptive_weight)
+            logging.debug(f"[Relevance-Mixed] YES/NO: {yes_no_score:.2f} (weight: {yes_no_weight:.2f}), Descriptive: {descriptive_score:.2f} (weight: {descriptive_weight:.2f}), Combined: {combined_score:.2f}")
+        elif yes_no_answers:
+            # Case 2: Only YES/NO answers
+            combined_score = yes_no_score
+            logging.debug(f"[Relevance-Mixed] YES/NO only: {combined_score:.2f}")
+        elif descriptive_answers:
+            # Case 3: Only descriptive answers
+            combined_score = descriptive_score
+            logging.debug(f"[Relevance-Mixed] Descriptive only: {combined_score:.2f}")
+        else:
+            # No valid answers
+            combined_score = 0
+            logging.debug(f"[Relevance-Mixed] No valid answers found")
 
-    # Determine relevance tag based on combined score
-    if combined_score >= 0.7:
-        return 'Relevant'
-    elif combined_score >= 0.4:
-        return 'Partially Relevant'
+    # Determine relevance tag based on combined score and configurable thresholds
+    if combined_score >= RELEVANT_THRESHOLD:
+        tag = 'Relevant'
+    elif combined_score >= PARTIALLY_RELEVANT_THRESHOLD:
+        tag = 'Partially Relevant'
     else:
-        return 'Irrelevant'
+        tag = 'Irrelevant'
+    
+    logging.debug(f"[Relevance-{mode.upper()}] Final score: {combined_score:.2f} → Tag: {tag}")
+    return tag
 
 def adjust_excel_formatting(output_file):
     # This function is for .xlsx, but the script now saves .csv
@@ -561,11 +626,20 @@ def process_image(task_evidence_link, task_evidence_question, task_name=None, ma
 
 {task_evidence_question}
 
-For each question, you can provide either:
-1. A clear YES or NO answer with brief reasoning, OR
-2. A detailed, descriptive answer that thoroughly explains what you observe
+IMPORTANT RESPONSE FORMAT:
+- For each question, provide EXACTLY ONE answer in the "answers" array
+- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
+- The answer can be either:
+  1. A clear YES or NO
+  2. A detailed descriptive answer (e.g., "The school has organized activities...")
 
-Choose the response format that best fits the question and provides the most valuable assessment of the evidence.
+Example for 1 question:
+{{
+  "answers": ["YES"],  // or ["The enrollment increased from 120 to 144"]
+  "reasonings": ["The image clearly shows enrollment data with increasing trend"]
+}}
+
+DO NOT put both YES/NO and explanation in the answers array!
 
 Focus on:
 - Visual evidence in the image
@@ -577,6 +651,34 @@ Focus on:
             selected_model = model
             if is_enrollment_task:
                 selected_model = enrollment_model
+                # Update the example to show enrollment fields
+                prompt = f"""You are an educational evidence validator. Analyze the given image and answer these questions:
+
+{task_evidence_question}
+
+IMPORTANT RESPONSE FORMAT:
+- For each question, provide EXACTLY ONE answer in the "answers" array
+- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
+- The answer can be either:
+  1. A clear YES or NO
+  2. A detailed descriptive answer (e.g., "The school has organized activities...")
+
+Example for 1 question with enrollment data:
+{{
+  "answers": ["20%"],
+  "reasonings": ["The image clearly shows enrollment data with increasing trend"],
+  "enrollment_2024": 120,
+  "enrollment_2025": 144,
+  "enrollment_increase_percentage": 20.0
+}}
+
+DO NOT put both YES/NO and explanation in the answers array!
+
+Focus on:
+- Visual evidence in the image
+- Relevance to the question
+- Quality and clarity of the evidence
+- Educational context and completeness"""
                 prompt += """
 
 ====================================================================================
@@ -691,6 +793,274 @@ CORRECT JSON Response:
     return {"error": "Max retries reached"}
 
 
+# === Helper function to determine evidence type ===
+def get_evidence_type(url):
+    """Determine evidence type from URL. Returns: 'image', 'pdf', 'excel', or None"""
+    url = str(url).strip().lower()
+    for ext in IMAGE_FORMATS:
+        if url.endswith(ext):
+            return "image"
+    for ext in PDF_FORMATS:
+        if url.endswith(ext):
+            return "pdf"
+    for ext in EXCEL_FORMATS:
+        if url.endswith(ext):
+            return "excel"
+    return None
+
+
+# === Enrollment prompt suffix (shared between image/pdf/excel processors) ===
+ENROLLMENT_PROMPT_SUFFIX = """
+
+====================================================================================
+⚠️ CRITICAL: ENROLLMENT DATA EXTRACTION FROM REPORT ⚠️
+====================================================================================
+
+You are analyzing an ENROLLMENT REPORT. You MUST extract THREE DIFFERENT numerical values:
+
+📊 VALUE 1: enrollment_2024 (INTEGER - Student Count)
+   WHERE TO FIND: Look for labels like:
+   - "Total enrolment number from last year"
+   - "Last Year Enrolment" 
+   - "Previous Year"
+   - Near the year "2024"
+   
+   WHAT TO EXTRACT: The STUDENT COUNT (typically 10-9999 range)
+   ❌ DO NOT extract: The year "2024" itself
+   ❌ DO NOT extract: Percentages
+   
+📊 VALUE 2: enrollment_2025 (INTEGER - Student Count)  
+   WHERE TO FIND: Look for labels like:
+   - "Total enrolment number from current year"
+   - "Current Year Enrolment"
+   - "This Year"
+   - Near the year "2025"
+   
+   WHAT TO EXTRACT: The STUDENT COUNT (typically 10-9999 range)
+   ❌ DO NOT extract: The year "2025" itself
+   ❌ DO NOT extract: Percentages
+
+📊 VALUE 3: enrollment_increase_percentage (FLOAT - Percentage Value)
+   WHERE TO FIND: Look for labels like:
+   - "% increase"
+   - "Percentage increase" 
+   - "Growth %"
+   - Usually has a "%" symbol
+   
+   WHAT TO EXTRACT: The PERCENTAGE number (can be negative)
+
+====================================================================================
+⚠️ If you cannot find a value clearly, set it to null. Do NOT guess!
+====================================================================================
+"""
+
+
+def process_pdf(task_evidence_link, task_evidence_question, task_name=None, max_retries=3):
+    """Process PDF evidence using Gemini API"""
+    global current_token_index
+    retries = 0
+    while retries < max_retries:
+        try:
+            rate_limiter()
+            # Download PDF
+            pdf_response = httpx.get(task_evidence_link)
+            pdf_data = pdf_response.content
+            
+            # Check if this is an enrollment-related task
+            task_name_normalized_check = (task_name.strip().rstrip("'\".").strip() if task_name else "")
+            filter_normalized_check = ENROLLMENT_TASK_FILTER.strip().rstrip("'\".").strip()
+            is_enrollment_task = (task_name_normalized_check == filter_normalized_check)
+            
+            if is_enrollment_task:
+                logging.info(f"[PDF] Using enrollment_model for task '{task_name_normalized_check}'")
+            
+            prompt = f"""You are an educational evidence validator. Analyze the given PDF document and answer these questions:
+
+{task_evidence_question}
+
+IMPORTANT RESPONSE FORMAT:
+- For each question, provide EXACTLY ONE answer in the "answers" array
+- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
+- The answer can be either:
+  1. A clear YES or NO
+  2. A detailed descriptive answer (e.g., "The school has organized activities...")
+
+Example for 1 question:
+{{
+  "answers": ["YES"],  // or ["The enrollment increased from 120 to 144"]
+  "reasonings": ["The document clearly shows enrollment data with increasing trend"]
+}}
+
+DO NOT put both YES/NO and explanation in the answers array!
+
+Focus on:
+- Content evidence in the document
+- Relevance to the question
+- Quality and clarity of the evidence
+- Educational context and completeness"""
+            
+            selected_model = model
+            if is_enrollment_task:
+                selected_model = enrollment_model
+                # Update the example to show enrollment fields
+                prompt = f"""You are an educational evidence validator. Analyze the given PDF document and answer these questions:
+
+{task_evidence_question}
+
+IMPORTANT RESPONSE FORMAT:
+- For each question, provide EXACTLY ONE answer in the "answers" array
+- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
+- The answer can be either:
+  1. A clear YES or NO
+  2. A detailed descriptive answer (e.g., "The school has organized activities...")
+
+Example for 1 question with enrollment data:
+{{
+  "answers": ["20%"],
+  "reasonings": ["The document clearly shows enrollment data with increasing trend"],
+  "enrollment_2024": 120,
+  "enrollment_2025": 144,
+  "enrollment_increase_percentage": 20.0
+}}
+
+DO NOT put both YES/NO and explanation in the answers array!
+
+Focus on:
+- Content evidence in the document
+- Relevance to the question
+- Quality and clarity of the evidence
+- Educational context and completeness"""
+                prompt += ENROLLMENT_PROMPT_SUFFIX
+            
+            response = selected_model.generate_content([
+                {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")},
+                prompt,
+            ])
+            response_json = json.loads(response.text)
+            return response_json
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+                logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
+                if switch_to_next_token():
+                    continue
+                else:
+                    logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
+                    time.sleep(60)
+                    retries += 1
+            else:
+                logging.error(f"[Gemini] PDF processing error: {e}")
+                retries += 1
+    logging.error("[Gemini] Max retries reached for PDF processing.")
+    return {"error": "Max retries reached"}
+
+
+def process_excel(task_evidence_link, task_evidence_question, task_name=None, max_retries=3):
+    """Process Excel evidence - download and convert to text for Gemini"""
+    global current_token_index
+    retries = 0
+    while retries < max_retries:
+        try:
+            rate_limiter()
+            # Download Excel file
+            excel_response = httpx.get(task_evidence_link)
+            
+            # Read Excel into DataFrame
+            df_excel = pd.read_excel(io.BytesIO(excel_response.content))
+            excel_text = df_excel.to_string()
+            
+            # Check if this is an enrollment-related task
+            task_name_normalized_check = (task_name.strip().rstrip("'\".").strip() if task_name else "")
+            filter_normalized_check = ENROLLMENT_TASK_FILTER.strip().rstrip("'\".").strip()
+            is_enrollment_task = (task_name_normalized_check == filter_normalized_check)
+            
+            if is_enrollment_task:
+                logging.info(f"[Excel] Using enrollment_model for task '{task_name_normalized_check}'")
+            
+            prompt = f"""You are an educational evidence validator. Analyze the following Excel spreadsheet data and answer these questions:
+
+{task_evidence_question}
+
+EXCEL DATA:
+{excel_text[:10000]}
+
+IMPORTANT RESPONSE FORMAT:
+- For each question, provide EXACTLY ONE answer in the "answers" array
+- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
+- The answer can be either:
+  1. A clear YES or NO
+  2. A detailed descriptive answer (e.g., "The enrollment increased from 120 to 144")
+
+Example for 1 question:
+{{
+  "answers": ["YES"],  // or ["The data shows increasing enrollment trend"]
+  "reasonings": ["The spreadsheet clearly shows enrollment data with upward trend"]
+}}
+
+DO NOT put both YES/NO and explanation in the answers array!
+
+Focus on:
+- Data evidence in the spreadsheet
+- Relevance to the question
+- Quality and completeness of the data
+- Educational context"""
+            
+            selected_model = model
+            if is_enrollment_task:
+                selected_model = enrollment_model
+                # Update the example to show enrollment fields
+                prompt = f"""You are an educational evidence validator. Analyze the following Excel spreadsheet data and answer these questions:
+
+{task_evidence_question}
+
+EXCEL DATA:
+{excel_text[:10000]}
+
+IMPORTANT RESPONSE FORMAT:
+- For each question, provide EXACTLY ONE answer in the "answers" array
+- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
+- The answer can be either:
+  1. A clear YES or NO
+  2. A detailed descriptive answer (e.g., "The enrollment increased from 120 to 144")
+
+Example for 1 question with enrollment data:
+{{
+  "answers": ["20%"],
+  "reasonings": ["The spreadsheet clearly shows enrollment data with upward trend"],
+  "enrollment_2024": 120,
+  "enrollment_2025": 144,
+  "enrollment_increase_percentage": 20.0
+}}
+
+DO NOT put both YES/NO and explanation in the answers array!
+
+Focus on:
+- Data evidence in the spreadsheet
+- Relevance to the question
+- Quality and completeness of the data
+- Educational context"""
+                prompt += ENROLLMENT_PROMPT_SUFFIX
+            
+            response = selected_model.generate_content([prompt])
+            response_json = json.loads(response.text)
+            return response_json
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+                logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
+                if switch_to_next_token():
+                    continue
+                else:
+                    logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
+                    time.sleep(60)
+                    retries += 1
+            else:
+                logging.error(f"[Gemini] Excel processing error: {e}")
+                retries += 1
+    logging.error("[Gemini] Max retries reached for Excel processing.")
+    return {"error": "Max retries reached"}
+
+
 # === Main processing ===
 def main(input_file, worker_id=None):
     try:
@@ -746,9 +1116,20 @@ def main(input_file, worker_id=None):
 
             task_types.append("User-Owned" if is_user_owned else "Standard")
 
-            if any(task_evidence.lower().endswith(ext) for ext in IMAGE_FORMATS):
-                logging.info(f"[Worker {worker_id}] Processing {'user-owned' if is_user_owned else 'standard'} task row {idx+1}/{len(df_filtered)}")
-                response = process_image(task_evidence, task_question, task_name_raw)
+            # Determine evidence type and route to appropriate processor
+            evidence_type = get_evidence_type(task_evidence)
+            if evidence_type:
+                logging.info(f"[Worker {worker_id}] Processing {evidence_type} {'user-owned' if is_user_owned else 'standard'} task row {idx+1}/{len(df_filtered)}")
+                
+                # Route to appropriate processor based on evidence type
+                if evidence_type == "image":
+                    response = process_image(task_evidence, task_question, task_name_raw)
+                elif evidence_type == "pdf":
+                    response = process_pdf(task_evidence, task_question, task_name_raw)
+                elif evidence_type == "excel":
+                    response = process_excel(task_evidence, task_question, task_name_raw)
+                else:
+                    response = None
                 if isinstance(response, dict) and "answers" in response and "reasonings" in response:
                     answers = response["answers"]
                     reasonings = response["reasonings"]
@@ -822,11 +1203,11 @@ def main(input_file, worker_id=None):
                     for key in EXTRA_KEYS.keys():
                         extra_keys_data[key].append(None)
             else:
-                logging.info(f"[Worker {worker_id}] Skipping non-image row {idx+1}")
+                logging.info(f"[Worker {worker_id}] Skipping unsupported evidence type at row {idx+1}")
                 task_evidence_qa.append(None)
                 task_evidence_qa_reason.append(None)
                 relevance_tags.append('Irrelevant')
-                task_types.append("Non-Image")
+                task_types.append("Unsupported")
                 for key in EXTRA_KEYS.keys():
                     extra_keys_data[key].append(None)
 
@@ -914,6 +1295,17 @@ if __name__ == "__main__":
     ]
 
     logging.info(f"[Main] Found {len(input_files)} input files to process.")
+    
+    # Log relevance scoring configuration
+    logging.info(f"[Main] ===== RELEVANCE SCORING CONFIGURATION =====")
+    logging.info(f"[Main] State: {STATE_NAME}")
+    logging.info(f"[Main] Relevance Mode: {RELEVANCE_MODE}")
+    logging.info(f"[Main]   - 'strict': Only YES/NO answers (Bihar)")
+    logging.info(f"[Main]   - 'mixed': Both YES/NO and descriptive (Haryana)")
+    logging.info(f"[Main]   - 'descriptive': Only descriptive answers")
+    logging.info(f"[Main] Relevant Threshold: >= {RELEVANT_THRESHOLD}")
+    logging.info(f"[Main] Partially Relevant Threshold: >= {PARTIALLY_RELEVANT_THRESHOLD}")
+    logging.info(f"[Main] ===============================================")
     
     # 🆕 Log extra keys configuration
     if ENABLE_EXTRA_KEYS:
