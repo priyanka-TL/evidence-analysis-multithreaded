@@ -20,6 +20,8 @@ load_dotenv()
 import threading
 import time
 from collections import deque
+import hashlib
+from pathlib import Path
 
 # === Constants ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
@@ -30,6 +32,12 @@ MAX_PROCESSED_ROWS = 520
 INPUT_DIR = "../pre-processor/parallel_input_split_1_files"
 OUTPUT_DIR = "../pre-processor/parallel_output_split_1_files"
 FINAL_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "merged_output_1.csv")
+CHECKPOINT_FILE = os.path.join(OUTPUT_DIR, ".processing_checkpoint.json")
+
+# === CHECKPOINT CONFIGURATION (from .env) ===
+RESUME_FROM_CHECKPOINT = os.getenv("RESUME_FROM_CHECKPOINT", "True").lower() == "true"
+CHECKPOINT_SAVE_FREQUENCY = int(os.getenv("CHECKPOINT_SAVE_FREQUENCY", "10"))
+CHECKPOINT_CLEANUP_ON_SUCCESS = os.getenv("CHECKPOINT_CLEANUP_ON_SUCCESS", "True").lower() == "true"
 
 # === STATE CONFIGURATION (from .env) ===
 STATE_NAME = os.getenv("STATE_NAME", "HARYANA")  # Default: HARYANA
@@ -93,6 +101,140 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# === Thread-safe checkpoint lock ===
+checkpoint_lock = threading.Lock()
+
+# ===== CHECKPOINT MANAGEMENT FUNCTIONS =====
+
+def generate_row_hash(row):
+    """
+    Generate unique hash for a row based on its key fields.
+    Uses: School ID + Task + Task Evidence URL
+    """
+    try:
+        school_id = str(row.get("School ID", "")).strip()
+        task = str(row.get("Tasks", "")).strip()
+        evidence = str(row.get("Task Evidence", "")).strip()
+        
+        # Create unique string
+        unique_str = f"{school_id}|{task}|{evidence}"
+        
+        # Generate hash
+        return hashlib.md5(unique_str.encode('utf-8')).hexdigest()
+    except Exception as e:
+        logger.error(f"Error generating row hash: {e}")
+        return None
+
+def load_checkpoint():
+    """
+    Load checkpoint file if it exists and RESUME_FROM_CHECKPOINT is enabled.
+    Returns: dict with file-level checkpoint data
+    """
+    if not RESUME_FROM_CHECKPOINT:
+        logger.info("[Checkpoint] Resume from checkpoint is DISABLED")
+        return {}
+    
+    if not os.path.exists(CHECKPOINT_FILE):
+        logger.info("[Checkpoint] No existing checkpoint found. Starting fresh.")
+        return {}
+    
+    try:
+        with open(CHECKPOINT_FILE, 'r') as f:
+            checkpoint_data = json.load(f)
+        
+        # Calculate statistics
+        total_processed = sum(
+            len(file_data.get('processed_ids', {})) 
+            for file_data in checkpoint_data.values()
+        )
+        
+        logger.info(f"[Checkpoint] ✓ Loaded checkpoint with {total_processed} processed rows across {len(checkpoint_data)} files")
+        
+        for file_name, file_data in checkpoint_data.items():
+            count = len(file_data.get('processed_ids', {}))
+            logger.info(f"[Checkpoint]   - {file_name}: {count} rows already processed")
+        
+        return checkpoint_data
+    except Exception as e:
+        logger.error(f"[Checkpoint] Error loading checkpoint: {e}. Starting fresh.")
+        return {}
+
+def save_checkpoint(checkpoint_data):
+    """
+    Save checkpoint data to file (thread-safe).
+    """
+    try:
+        with checkpoint_lock:
+            # Add metadata
+            checkpoint_data['_metadata'] = {
+                'last_updated': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'total_files': len([k for k in checkpoint_data.keys() if not k.startswith('_')]),
+                'total_processed': sum(
+                    len(v.get('processed_ids', {})) 
+                    for k, v in checkpoint_data.items() 
+                    if not k.startswith('_')
+                )
+            }
+            
+            # Write to temp file first, then rename (atomic operation)
+            temp_file = CHECKPOINT_FILE + '.tmp'
+            with open(temp_file, 'w') as f:
+                json.dump(checkpoint_data, f, indent=2)
+            
+            # Atomic rename
+            os.replace(temp_file, CHECKPOINT_FILE)
+            
+    except Exception as e:
+        logger.error(f"[Checkpoint] Error saving checkpoint: {e}")
+
+def is_row_processed(file_name, row_hash, checkpoint_data):
+    """
+    Check if a specific row has already been processed.
+    """
+    if not RESUME_FROM_CHECKPOINT or not row_hash:
+        return False
+    
+    file_data = checkpoint_data.get(file_name, {})
+    processed_ids = file_data.get('processed_ids', {})
+    
+    return row_hash in processed_ids
+
+def mark_row_processed(file_name, row_hash, checkpoint_data, row_result=None):
+    """
+    Mark a row as processed in the checkpoint data.
+    """
+    if not row_hash:
+        return
+    
+    if file_name not in checkpoint_data:
+        checkpoint_data[file_name] = {
+            'processed_ids': {},
+            'started_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'total_processed': 0
+        }
+    
+    checkpoint_data[file_name]['processed_ids'][row_hash] = {
+        'status': 'success',
+        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'result_summary': row_result if row_result else 'processed'
+    }
+    
+    checkpoint_data[file_name]['total_processed'] = len(checkpoint_data[file_name]['processed_ids'])
+    checkpoint_data[file_name]['last_updated'] = time.strftime('%Y-%m-%d %H:%M:%S')
+
+def cleanup_checkpoint():
+    """
+    Remove checkpoint file after successful completion.
+    """
+    if CHECKPOINT_CLEANUP_ON_SUCCESS and os.path.exists(CHECKPOINT_FILE):
+        try:
+            os.remove(CHECKPOINT_FILE)
+            logger.info("[Checkpoint] ✓ Checkpoint file cleaned up after successful completion")
+        except Exception as e:
+            logger.warning(f"[Checkpoint] Could not cleanup checkpoint file: {e}")
+
+# ===== END OF CHECKPOINT FUNCTIONS =====
 
 def load_questions_mapping(questions_file):
     """Load questions mapping from CSV file"""
@@ -1062,13 +1204,32 @@ Focus on:
 
 
 # === Main processing ===
-def main(input_file, worker_id=None):
+def main(input_file, worker_id=None, checkpoint_data=None):
     try:
         logging.info(f"[Worker {worker_id}] Starting processing for {input_file}")
 
         if not os.path.exists(input_file):
             logging.error(f"[Worker {worker_id}] File not found: {input_file}")
             return None
+        
+        # Get base filename for checkpoint tracking
+        input_filename = os.path.basename(input_file)
+        
+        # Initialize checkpoint for this file if not exists
+        if checkpoint_data is None:
+            checkpoint_data = {}
+        
+        if input_filename not in checkpoint_data and RESUME_FROM_CHECKPOINT:
+            checkpoint_data[input_filename] = {
+                'processed_ids': {},
+                'started_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'total_processed': 0
+            }
+        
+        # Track checkpoint stats
+        rows_skipped_from_checkpoint = 0
+        rows_processed_new = 0
+        checkpoint_save_counter = 0
 
         # Load questions mapping
         questions_file = "../input/questions.csv"
@@ -1094,6 +1255,29 @@ def main(input_file, worker_id=None):
         extra_keys_data = {key: [] for key in EXTRA_KEYS.keys()}
 
         for idx, row in df_filtered.iterrows():
+            # ===== CHECKPOINT: Generate row hash =====
+            row_hash = generate_row_hash(row)
+            
+            # ===== CHECKPOINT: Check if already processed =====
+            if RESUME_FROM_CHECKPOINT and is_row_processed(input_filename, row_hash, checkpoint_data):
+                rows_skipped_from_checkpoint += 1
+                if rows_skipped_from_checkpoint % 10 == 1:  # Log every 10th skip
+                    logging.info(f"[Worker {worker_id}] [Checkpoint] Skipped {rows_skipped_from_checkpoint} rows (already processed)")
+                
+                # Append placeholder data to maintain DataFrame alignment
+                task_evidence_qa.append([])
+                task_evidence_qa_reason.append([])
+                relevance_tags.append("Skipped-Checkpoint")
+                task_types.append("Checkpoint-Skip")
+                
+                # Add placeholder for extra keys
+                if ENABLE_EXTRA_KEYS:
+                    for key in EXTRA_KEYS.keys():
+                        extra_keys_data[key].append(None)
+                
+                continue  # Skip to next row
+            
+            # ===== PROCESS ROW (Not in checkpoint) =====
             task_evidence = str(row["Task Evidence"]).strip()
             task_question_raw = row.get("Task Evidence Question", "")
             task_question = str(task_question_raw).strip() if pd.notna(task_question_raw) and task_question_raw != "Null" else ""
@@ -1135,7 +1319,19 @@ def main(input_file, worker_id=None):
                     reasonings = response["reasonings"]
                     task_evidence_qa.append(answers)
                     task_evidence_qa_reason.append(reasonings)
-                    relevance_tags.append(calculate_relevance_tag(answers))
+                    relevance_tag = calculate_relevance_tag(answers)
+                    relevance_tags.append(relevance_tag)
+                    
+                    # ===== CHECKPOINT: Mark row as processed =====
+                    rows_processed_new += 1
+                    mark_row_processed(input_filename, row_hash, checkpoint_data, relevance_tag)
+                    
+                    # ===== CHECKPOINT: Save periodically =====
+                    checkpoint_save_counter += 1
+                    if checkpoint_save_counter >= CHECKPOINT_SAVE_FREQUENCY:
+                        save_checkpoint(checkpoint_data)
+                        checkpoint_save_counter = 0
+                        logging.info(f"[Worker {worker_id}] [Checkpoint] Saved progress: {rows_processed_new} new rows processed")
 
                     # 🆕 Extract enrollment data from JSON response or use regex fallback
                     if ENABLE_EXTRA_KEYS:
@@ -1235,12 +1431,20 @@ def main(input_file, worker_id=None):
 
         # ✅ Changed to save as CSV instead of XLSX
         output_filename = os.path.join(OUTPUT_DIR, f"processed_{os.path.basename(input_file).split('.')[0]}.csv")
-        df_filtered.to_csv(output_filename, index=False)
+        
+        # ===== CHECKPOINT: Filter out checkpoint-skipped rows before saving =====
+        df_to_save = df_filtered[df_filtered["Relevance Tag"] != "Skipped-Checkpoint"].copy()
+        df_to_save.to_csv(output_filename, index=False)
+        
+        # ===== CHECKPOINT: Final save for this file =====
+        if RESUME_FROM_CHECKPOINT:
+            save_checkpoint(checkpoint_data)
+            logging.info(f"[Worker {worker_id}] [Checkpoint] Final save - Total: {rows_skipped_from_checkpoint + rows_processed_new} rows ({rows_skipped_from_checkpoint} from checkpoint, {rows_processed_new} newly processed)")
         
         logging.info(f"[Worker {worker_id}] Finished processing {input_file}. Output: {output_filename}")
         
         # Separate user-owned tasks for reporting
-        user_owned_df = df_filtered[df_filtered["Task Type"] == "User-Owned"]
+        user_owned_df = df_to_save[df_to_save["Task Type"] == "User-Owned"]
         if not user_owned_df.empty:
             user_owned_filename = os.path.join(OUTPUT_DIR, f"user_owned_tasks_{os.path.basename(input_file).split('.')[0]}.csv")
             user_owned_df.to_csv(user_owned_filename, index=False)
@@ -1249,35 +1453,43 @@ def main(input_file, worker_id=None):
                 "output_file": output_filename,
                 "user_owned_file": user_owned_filename,
                 "rows_attempted": processed_count,
-                "api_calls": processed_count,
-                "api_successes": sum(1 for tag in relevance_tags if tag != 'Irrelevant'),
-                "api_failures": sum(1 for tag in relevance_tags if tag == 'Irrelevant'),
-                "success_list": [task_evidence for task_evidence, tag in zip(df_filtered["Task Evidence"], relevance_tags) if tag != 'Irrelevant'],
-                "failed_list": [task_evidence for task_evidence, tag in zip(df_filtered["Task Evidence"], relevance_tags) if tag == 'Irrelevant'],
+                "api_calls": rows_processed_new,  # Only count new API calls
+                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag != 'Irrelevant'),
+                "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == 'Irrelevant'),
+                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag != 'Irrelevant'],
+                "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == 'Irrelevant'],
                 "user_owned_count": len(user_owned_df),
-                "standard_count": len(df_filtered) - len(user_owned_df)
+                "standard_count": len(df_to_save) - len(user_owned_df),
+                "checkpoint_skipped": rows_skipped_from_checkpoint,
+                "checkpoint_new": rows_processed_new
             }
         else:
             return {
                 "output_file": output_filename,
                 "rows_attempted": processed_count,
-                "api_calls": processed_count,
-                "api_successes": sum(1 for tag in relevance_tags if tag != 'Irrelevant'),
-                "api_failures": sum(1 for tag in relevance_tags if tag == 'Irrelevant'),
-                "success_list": [task_evidence for task_evidence, tag in zip(df_filtered["Task Evidence"], relevance_tags) if tag != 'Irrelevant'],
-                "failed_list": [task_evidence for task_evidence, tag in zip(df_filtered["Task Evidence"], relevance_tags) if tag == 'Irrelevant'],
+                "api_calls": rows_processed_new,  # Only count new API calls
+                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag != 'Irrelevant'),
+                "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == 'Irrelevant'),
+                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag != 'Irrelevant'],
+                "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == 'Irrelevant'],
                 "user_owned_count": 0,
-                "standard_count": len(df_filtered)
+                "standard_count": len(df_to_save),
+                "checkpoint_skipped": rows_skipped_from_checkpoint,
+                "checkpoint_new": rows_processed_new
             }
 
     except Exception as e:
         logging.exception(f"[Worker {worker_id}] Failed to process {input_file}: {e}")
+        # ===== CHECKPOINT: Save on error too =====
+        if RESUME_FROM_CHECKPOINT and checkpoint_data:
+            save_checkpoint(checkpoint_data)
+            logging.info(f"[Worker {worker_id}] [Checkpoint] Saved progress before error exit")
         return None
 
 
-def process_file_parallel(file_path, worker_id):
+def process_file_parallel(file_path, worker_id, checkpoint_data=None):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    result = main(file_path, worker_id)  # Get stats dictionary
+    result = main(file_path, worker_id, checkpoint_data)  # Get stats dictionary
     if result and isinstance(result, dict):
         logging.info(f"[Worker {worker_id}] Output saved as {result['output_file']}")
         if 'user_owned_file' in result:
@@ -1295,6 +1507,19 @@ if __name__ == "__main__":
     ]
 
     logging.info(f"[Main] Found {len(input_files)} input files to process.")
+    
+    # ===== CHECKPOINT: Load existing checkpoint =====
+    global_checkpoint = load_checkpoint()
+    
+    # Log checkpoint configuration
+    logging.info(f"[Main] ===== CHECKPOINT CONFIGURATION =====")
+    logging.info(f"[Main] Resume from checkpoint: {RESUME_FROM_CHECKPOINT}")
+    logging.info(f"[Main] Checkpoint save frequency: Every {CHECKPOINT_SAVE_FREQUENCY} rows")
+    logging.info(f"[Main] Checkpoint cleanup on success: {CHECKPOINT_CLEANUP_ON_SUCCESS}")
+    if RESUME_FROM_CHECKPOINT and global_checkpoint:
+        total_existing = sum(len(f.get('processed_ids', {})) for f in global_checkpoint.values() if not f.startswith('_'))
+        logging.info(f"[Main] Found existing checkpoint with {total_existing} processed rows")
+    logging.info(f"[Main] ===============================================")
     
     # Log relevance scoring configuration
     logging.info(f"[Main] ===== RELEVANCE SCORING CONFIGURATION =====")
@@ -1320,6 +1545,8 @@ if __name__ == "__main__":
     total_api_calls_all = 0
     total_api_success_all = 0
     total_api_failure_all = 0
+    total_checkpoint_skipped_all = 0
+    total_checkpoint_new_all = 0
     all_success_lists = []
     all_failed_lists = []
     processed_files = [] # List of successful output file paths
@@ -1332,7 +1559,7 @@ if __name__ == "__main__":
     processed_files = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(input_files)) as executor:
         futures = {
-            executor.submit(process_file_parallel, f, idx + 1): f
+            executor.submit(process_file_parallel, f, idx + 1, global_checkpoint): f
             for idx, f in enumerate(input_files)
         }
         for future in concurrent.futures.as_completed(futures):
@@ -1345,6 +1572,8 @@ if __name__ == "__main__":
                 total_api_calls_all += result_stats["api_calls"]
                 total_api_success_all += result_stats["api_successes"]
                 total_api_failure_all += result_stats["api_failures"]
+                total_checkpoint_skipped_all += result_stats.get("checkpoint_skipped", 0)
+                total_checkpoint_new_all += result_stats.get("checkpoint_new", 0)
                 all_success_lists.extend(result_stats["success_list"])
                 all_failed_lists.extend(result_stats["failed_list"])
                 total_user_owned_count += result_stats.get("user_owned_count", 0)
@@ -1367,6 +1596,11 @@ if __name__ == "__main__":
             merged_df = pd.concat([pd.read_csv(f) for f in processed_files], ignore_index=True)
             merged_df.to_csv(FINAL_OUTPUT_FILE, index=False)
             logging.info(f"✅ All files processed and merged into: {FINAL_OUTPUT_FILE}")
+            
+            # Clean up checkpoint after successful completion
+            if CHECKPOINT_CLEANUP_ON_SUCCESS and RESUME_FROM_CHECKPOINT:
+                cleanup_checkpoint()
+                logging.info(f"[Main] Checkpoint cleaned up successfully")
             
             # Create separate user-owned tasks summary if any exist
             if user_owned_files:
@@ -1397,6 +1631,18 @@ if __name__ == "__main__":
         logging.info(f"Total API Calls (image rows attempted): {total_api_calls_all}")
         logging.info(f"  - ✅ Success: {total_api_success_all}")
         logging.info(f"  - ❌ Failed: {total_api_failure_all}")
+        
+        # Checkpoint statistics
+        if RESUME_FROM_CHECKPOINT:
+            logging.info("")
+            logging.info(f"===== CHECKPOINT STATISTICS =====")
+            logging.info(f"Rows skipped (from checkpoint): {total_checkpoint_skipped_all}")
+            logging.info(f"New API calls made: {total_checkpoint_new_all}")
+            logging.info(f"API calls saved: {total_checkpoint_skipped_all}")
+            if total_checkpoint_skipped_all > 0:
+                # Rough estimate: $0.01 per API call (adjust based on your API pricing)
+                estimated_savings = total_checkpoint_skipped_all * 0.01
+                logging.info(f"💰 Estimated cost saved: ${estimated_savings:.2f}")
         
         logging.info("")
         logging.info(f"Total Input Files Processed Successfully: {len(processed_files)}")
