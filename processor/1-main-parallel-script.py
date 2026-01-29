@@ -33,6 +33,7 @@ INPUT_DIR = "../pre-processor/parallel_input_split_1_files"
 OUTPUT_DIR = "../pre-processor/parallel_output_split_1_files"
 FINAL_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "merged_output_1.csv")
 CHECKPOINT_FILE = os.path.join(OUTPUT_DIR, ".processing_checkpoint.json")
+API_USAGE_LOG_FILE = os.path.join(OUTPUT_DIR, "api_usage_log.csv")
 
 # === CHECKPOINT CONFIGURATION (from .env) ===
 RESUME_FROM_CHECKPOINT = os.getenv("RESUME_FROM_CHECKPOINT", "True").lower() == "true"
@@ -104,6 +105,26 @@ logger = logging.getLogger(__name__)
 
 # === Thread-safe checkpoint lock ===
 checkpoint_lock = threading.Lock()
+
+# === Thread-safe API usage tracking lock ===
+api_usage_lock = threading.Lock()
+
+# === API PRICING CONFIGURATION (per 1M tokens) ===
+# Gemini 2.0 Flash pricing as of Jan 2026
+GEMINI_PRICING = {
+    "gemini-2.0-flash": {
+        "input_price_per_million": 0.075,   # $0.075 per 1M input tokens
+        "output_price_per_million": 0.30,   # $0.30 per 1M output tokens
+    },
+    "gemini-1.5-flash": {
+        "input_price_per_million": 0.075,
+        "output_price_per_million": 0.30,
+    },
+    "gemini-1.5-pro": {
+        "input_price_per_million": 1.25,
+        "output_price_per_million": 5.00,
+    }
+}
 
 # ===== CHECKPOINT MANAGEMENT FUNCTIONS =====
 
@@ -235,6 +256,152 @@ def cleanup_checkpoint():
             logger.warning(f"[Checkpoint] Could not cleanup checkpoint file: {e}")
 
 # ===== END OF CHECKPOINT FUNCTIONS =====
+
+# ===== API USAGE TRACKING FUNCTIONS =====
+
+def initialize_api_usage_log():
+    """
+    Initialize API usage log file with headers if it doesn't exist.
+    """
+    if not os.path.exists(API_USAGE_LOG_FILE):
+        with open(API_USAGE_LOG_FILE, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'Timestamp',
+                'Worker_ID',
+                'Input_File',
+                'Row_Number',
+                'School_ID',
+                'Task',
+                'Evidence_URL',
+                'Model_Name',
+                'API_Call_Type',
+                'Input_Tokens',
+                'Output_Tokens',
+                'Total_Tokens',
+                'Input_Cost_USD',
+                'Output_Cost_USD',
+                'Total_Cost_USD',
+                'Status',
+                'Error_Message'
+            ])
+        logging.info(f"[API Usage] Created new API usage log: {API_USAGE_LOG_FILE}")
+
+def log_api_usage(worker_id, input_file, row_number, school_id, task, model_name, 
+                  api_call_type, response=None, status='success', error_message='', evidence_url=''):
+    """
+    Log API usage with token counts and costs to CSV file (thread-safe).
+    
+    Args:
+        worker_id: Worker/thread identifier
+        input_file: Input CSV file being processed
+        row_number: Row number in the input file
+        school_id: School ID from the row
+        task: Task name
+        model_name: Gemini model name used
+        api_call_type: Type of API call (e.g., 'image_analysis', 'pdf_analysis', 'enrollment_analysis')
+        response: Gemini API response object (contains usage_metadata)
+        status: 'success' or 'failure'
+        error_message: Error message if status is 'failure'
+        evidence_url: URL of the evidence being processed
+    """
+    try:
+        # Extract token counts from response
+        input_tokens = 0
+        output_tokens = 0
+        total_tokens = 0
+        
+        if response and hasattr(response, 'usage_metadata'):
+            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0)
+            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0)
+            total_tokens = getattr(response.usage_metadata, 'total_token_count', 0)
+        
+        # Calculate costs based on model pricing
+        pricing = GEMINI_PRICING.get(model_name, GEMINI_PRICING.get("gemini-2.0-flash"))
+        input_cost = (input_tokens / 1_000_000) * pricing["input_price_per_million"]
+        output_cost = (output_tokens / 1_000_000) * pricing["output_price_per_million"]
+        total_cost = input_cost + output_cost
+        
+        # Thread-safe write to CSV
+        with api_usage_lock:
+            with open(API_USAGE_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    time.strftime('%Y-%m-%d %H:%M:%S'),
+                    worker_id,
+                    os.path.basename(input_file),
+                    row_number,
+                    school_id,
+                    task[:50] if task else '',  # Truncate task name to 50 chars
+                    evidence_url[:200] if evidence_url else '',  # Truncate URL to 200 chars
+                    model_name,
+                    api_call_type,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    f"{input_cost:.6f}",
+                    f"{output_cost:.6f}",
+                    f"{total_cost:.6f}",
+                    status,
+                    error_message[:100] if error_message else ''  # Truncate error to 100 chars
+                ])
+    except Exception as e:
+        logging.warning(f"[API Usage] Failed to log API usage: {e}")
+
+def generate_api_usage_summary():
+    """
+    Generate summary statistics from API usage log.
+    Returns dict with summary stats.
+    """
+    try:
+        if not os.path.exists(API_USAGE_LOG_FILE):
+            return None
+        
+        df = pd.read_csv(API_USAGE_LOG_FILE)
+        
+        if df.empty:
+            return None
+        
+        summary = {
+            'total_api_calls': len(df),
+            'successful_calls': len(df[df['Status'] == 'success']),
+            'failed_calls': len(df[df['Status'] == 'failure']),
+            'total_input_tokens': df['Input_Tokens'].sum(),
+            'total_output_tokens': df['Output_Tokens'].sum(),
+            'total_tokens': df['Total_Tokens'].sum(),
+            'total_cost_usd': df['Total_Cost_USD'].astype(float).sum(),
+            'avg_input_tokens_per_call': df['Input_Tokens'].mean(),
+            'avg_output_tokens_per_call': df['Output_Tokens'].mean(),
+            'avg_cost_per_call': df['Total_Cost_USD'].astype(float).mean(),
+        }
+        
+        # Per-model breakdown
+        model_breakdown = df.groupby('Model_Name').agg({
+            'Input_Tokens': 'sum',
+            'Output_Tokens': 'sum',
+            'Total_Tokens': 'sum',
+            'Total_Cost_USD': lambda x: x.astype(float).sum()
+        }).to_dict('index')
+        
+        summary['model_breakdown'] = model_breakdown
+        
+        # Per-worker breakdown
+        worker_breakdown = df.groupby('Worker_ID').agg({
+            'Input_Tokens': 'sum',
+            'Output_Tokens': 'sum',
+            'Total_Tokens': 'sum',
+            'Total_Cost_USD': lambda x: x.astype(float).sum()
+        }).to_dict('index')
+        
+        summary['worker_breakdown'] = worker_breakdown
+        
+        return summary
+        
+    except Exception as e:
+        logging.error(f"[API Usage] Failed to generate summary: {e}")
+        return None
+
+# ===== END OF API USAGE TRACKING FUNCTIONS =====
 
 def load_questions_mapping(questions_file):
     """Load questions mapping from CSV file"""
@@ -747,7 +914,8 @@ def rate_limiter():
         _request_times.append(time.time())
 
 
-def process_image(task_evidence_link, task_evidence_question, task_name=None, max_retries=3):
+def process_image(task_evidence_link, task_evidence_question, task_name=None, max_retries=3,
+                  worker_id=None, input_file=None, row_number=None, school_id=None):
     global current_token_index
     retries = 0
     while retries < max_retries:
@@ -917,6 +1085,22 @@ CORRECT JSON Response:
                 prompt,
             ])
             response_json = json.loads(response.text)
+            
+            # Log API usage
+            api_call_type = "enrollment_analysis" if is_enrollment_task else "image_analysis"
+            log_api_usage(
+                worker_id=worker_id or "unknown",
+                input_file=input_file or "unknown",
+                row_number=row_number or 0,
+                school_id=school_id or "unknown",
+                task=task_name or "unknown",
+                model_name="gemini-2.0-flash",
+                api_call_type=api_call_type,
+                response=response,
+                status='success',
+                evidence_url=task_evidence_link or ""
+            )
+            
             return response_json
         except Exception as e:
             error_str = str(e).lower()
@@ -997,8 +1181,9 @@ You are analyzing an ENROLLMENT REPORT. You MUST extract THREE DIFFERENT numeric
 """
 
 
-def process_pdf(task_evidence_link, task_evidence_question, task_name=None, max_retries=3):
-    """Process PDF evidence using Gemini API"""
+def process_pdf(task_evidence_link, task_evidence_question, task_name=None, max_retries=3,
+                worker_id=None, input_file=None, row_number=None, school_id=None):
+    """Process PDF evidence using Gemini API with usage tracking"""
     global current_token_index
     retries = 0
     while retries < max_retries:
@@ -1079,6 +1264,22 @@ Focus on:
                 prompt,
             ])
             response_json = json.loads(response.text)
+            
+            # Log API usage
+            api_call_type = "enrollment_analysis" if is_enrollment_task else "pdf_analysis"
+            log_api_usage(
+                worker_id=worker_id or "unknown",
+                input_file=input_file or "unknown",
+                row_number=row_number or 0,
+                school_id=school_id or "unknown",
+                task=task_name or "unknown",
+                model_name="gemini-2.0-flash",
+                api_call_type=api_call_type,
+                response=response,
+                status='success',
+                evidence_url=task_evidence_link or ""
+            )
+            
             return response_json
         except Exception as e:
             error_str = str(e).lower()
@@ -1097,8 +1298,9 @@ Focus on:
     return {"error": "Max retries reached"}
 
 
-def process_excel(task_evidence_link, task_evidence_question, task_name=None, max_retries=3):
-    """Process Excel evidence - download and convert to text for Gemini"""
+def process_excel(task_evidence_link, task_evidence_question, task_name=None, max_retries=3,
+                  worker_id=None, input_file=None, row_number=None, school_id=None):
+    """Process Excel evidence - download and convert to text for Gemini with usage tracking"""
     global current_token_index
     retries = 0
     while retries < max_retries:
@@ -1185,6 +1387,22 @@ Focus on:
             
             response = selected_model.generate_content([prompt])
             response_json = json.loads(response.text)
+            
+            # Log API usage
+            api_call_type = "enrollment_analysis" if is_enrollment_task else "excel_analysis"
+            log_api_usage(
+                worker_id=worker_id or "unknown",
+                input_file=input_file or "unknown",
+                row_number=row_number or 0,
+                school_id=school_id or "unknown",
+                task=task_name or "unknown",
+                model_name="gemini-2.0-flash",
+                api_call_type=api_call_type,
+                response=response,
+                status='success',
+                evidence_url=task_evidence_link or ""
+            )
+            
             return response_json
         except Exception as e:
             error_str = str(e).lower()
@@ -1245,6 +1463,27 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         # Don't filter out rows with Null Task Evidence Question - they might be user-owned tasks
         logging.info(f"[Worker {worker_id}] Total rows after filtering: {len(df_filtered)}")
 
+        # ===== CHECKPOINT: Filter out already-processed rows BEFORE processing =====
+        if RESUME_FROM_CHECKPOINT and input_filename in checkpoint_data:
+            processed_ids = set(checkpoint_data[input_filename].get('processed_ids', {}).keys())
+            if processed_ids:
+                # Generate hashes for all rows
+                row_hashes = df_filtered.apply(generate_row_hash, axis=1)
+                # Keep only unprocessed rows
+                rows_before = len(df_filtered)
+                df_filtered = df_filtered[~row_hashes.isin(processed_ids)].copy()
+                df_filtered.reset_index(drop=True, inplace=True)
+                rows_skipped_from_checkpoint = rows_before - len(df_filtered)
+                if rows_skipped_from_checkpoint > 0:
+                    logging.info(f"[Worker {worker_id}] [Checkpoint] Filtered out {rows_skipped_from_checkpoint} already-processed rows")
+
+        # 🆕 Add extra key columns if enabled
+        if ENABLE_EXTRA_KEYS:
+            for key_name in EXTRA_KEYS.keys():
+                if key_name not in df_filtered.columns:
+                    df_filtered[key_name] = ""
+                    logging.info(f"[Worker {worker_id}] Added extra key column: {key_name}")
+
         processed_count = 0
         task_evidence_qa = []
         task_evidence_qa_reason = []
@@ -1255,33 +1494,15 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         extra_keys_data = {key: [] for key in EXTRA_KEYS.keys()}
 
         for idx, row in df_filtered.iterrows():
-            # ===== CHECKPOINT: Generate row hash =====
+            # ===== CHECKPOINT: Generate row hash for marking as processed =====
             row_hash = generate_row_hash(row)
             
-            # ===== CHECKPOINT: Check if already processed =====
-            if RESUME_FROM_CHECKPOINT and is_row_processed(input_filename, row_hash, checkpoint_data):
-                rows_skipped_from_checkpoint += 1
-                if rows_skipped_from_checkpoint % 10 == 1:  # Log every 10th skip
-                    logging.info(f"[Worker {worker_id}] [Checkpoint] Skipped {rows_skipped_from_checkpoint} rows (already processed)")
-                
-                # Append placeholder data to maintain DataFrame alignment
-                task_evidence_qa.append([])
-                task_evidence_qa_reason.append([])
-                relevance_tags.append("Skipped-Checkpoint")
-                task_types.append("Checkpoint-Skip")
-                
-                # Add placeholder for extra keys
-                if ENABLE_EXTRA_KEYS:
-                    for key in EXTRA_KEYS.keys():
-                        extra_keys_data[key].append(None)
-                
-                continue  # Skip to next row
-            
-            # ===== PROCESS ROW (Not in checkpoint) =====
+            # ===== PROCESS ROW (all rows here need processing) =====
             task_evidence = str(row["Task Evidence"]).strip()
             task_question_raw = row.get("Task Evidence Question", "")
             task_question = str(task_question_raw).strip() if pd.notna(task_question_raw) and task_question_raw != "Null" else ""
             task_name_raw = str(row.get("Tasks", "")).strip()
+            school_id = str(row.get("School ID", "unknown")).strip()
 
             # Normalize task name for matching (remove trailing quotes, periods, etc.)
             task_name = task_name_raw.rstrip("'.").strip()
@@ -1307,11 +1528,23 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 
                 # Route to appropriate processor based on evidence type
                 if evidence_type == "image":
-                    response = process_image(task_evidence, task_question, task_name_raw)
+                    response = process_image(
+                        task_evidence, task_question, task_name_raw,
+                        worker_id=worker_id, input_file=input_file, 
+                        row_number=idx+1, school_id=school_id
+                    )
                 elif evidence_type == "pdf":
-                    response = process_pdf(task_evidence, task_question, task_name_raw)
+                    response = process_pdf(
+                        task_evidence, task_question, task_name_raw,
+                        worker_id=worker_id, input_file=input_file,
+                        row_number=idx+1, school_id=school_id
+                    )
                 elif evidence_type == "excel":
-                    response = process_excel(task_evidence, task_question, task_name_raw)
+                    response = process_excel(
+                        task_evidence, task_question, task_name_raw,
+                        worker_id=worker_id, input_file=input_file,
+                        row_number=idx+1, school_id=school_id
+                    )
                 else:
                     response = None
                 if isinstance(response, dict) and "answers" in response and "reasonings" in response:
@@ -1511,13 +1744,17 @@ if __name__ == "__main__":
     # ===== CHECKPOINT: Load existing checkpoint =====
     global_checkpoint = load_checkpoint()
     
+    # ===== API USAGE: Initialize tracking log =====
+    initialize_api_usage_log()
+    logging.info(f"[Main] API usage log: {API_USAGE_LOG_FILE}")
+    
     # Log checkpoint configuration
     logging.info(f"[Main] ===== CHECKPOINT CONFIGURATION =====")
     logging.info(f"[Main] Resume from checkpoint: {RESUME_FROM_CHECKPOINT}")
     logging.info(f"[Main] Checkpoint save frequency: Every {CHECKPOINT_SAVE_FREQUENCY} rows")
     logging.info(f"[Main] Checkpoint cleanup on success: {CHECKPOINT_CLEANUP_ON_SUCCESS}")
     if RESUME_FROM_CHECKPOINT and global_checkpoint:
-        total_existing = sum(len(f.get('processed_ids', {})) for f in global_checkpoint.values() if not f.startswith('_'))
+        total_existing = sum(len(v.get('processed_ids', {})) for k, v in global_checkpoint.items() if not k.startswith('_'))
         logging.info(f"[Main] Found existing checkpoint with {total_existing} processed rows")
     logging.info(f"[Main] ===============================================")
     
@@ -1643,6 +1880,47 @@ if __name__ == "__main__":
                 # Rough estimate: $0.01 per API call (adjust based on your API pricing)
                 estimated_savings = total_checkpoint_skipped_all * 0.01
                 logging.info(f"💰 Estimated cost saved: ${estimated_savings:.2f}")
+        
+        # API Usage Statistics
+        logging.info("")
+        logging.info(f"===== API USAGE & COST STATISTICS =====")
+        api_summary = generate_api_usage_summary()
+        if api_summary:
+            logging.info(f"Total API Calls Logged: {api_summary['total_api_calls']}")
+            logging.info(f"  - ✅ Successful: {api_summary['successful_calls']}")
+            logging.info(f"  - ❌ Failed: {api_summary['failed_calls']}")
+            logging.info(f"")
+            logging.info(f"Token Usage:")
+            logging.info(f"  - Input Tokens: {api_summary['total_input_tokens']:,}")
+            logging.info(f"  - Output Tokens: {api_summary['total_output_tokens']:,}")
+            logging.info(f"  - Total Tokens: {api_summary['total_tokens']:,}")
+            logging.info(f"")
+            logging.info(f"Cost Breakdown:")
+            logging.info(f"  - Total Cost: ${api_summary['total_cost_usd']:.4f} USD")
+            logging.info(f"  - Avg Cost per Call: ${api_summary['avg_cost_per_call']:.6f} USD")
+            logging.info(f"  - Avg Input Tokens per Call: {api_summary['avg_input_tokens_per_call']:.0f}")
+            logging.info(f"  - Avg Output Tokens per Call: {api_summary['avg_output_tokens_per_call']:.0f}")
+            
+            if api_summary.get('model_breakdown'):
+                logging.info(f"")
+                logging.info(f"Per-Model Breakdown:")
+                for model, stats in api_summary['model_breakdown'].items():
+                    logging.info(f"  {model}:")
+                    logging.info(f"    - Tokens: {stats['Total_Tokens']:,}")
+                    logging.info(f"    - Cost: ${stats['Total_Cost_USD']:.4f} USD")
+            
+            if api_summary.get('worker_breakdown'):
+                logging.info(f"")
+                logging.info(f"Per-Worker Breakdown:")
+                for worker, stats in api_summary['worker_breakdown'].items():
+                    logging.info(f"  Worker-{worker}:")
+                    logging.info(f"    - Tokens: {stats['Total_Tokens']:,}")
+                    logging.info(f"    - Cost: ${stats['Total_Cost_USD']:.4f} USD")
+            
+            logging.info(f"")
+            logging.info(f"📊 Detailed API usage log saved to: {API_USAGE_LOG_FILE}")
+        else:
+            logging.info(f"No API usage data recorded")
         
         logging.info("")
         logging.info(f"Total Input Files Processed Successfully: {len(processed_files)}")
