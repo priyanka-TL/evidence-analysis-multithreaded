@@ -14,7 +14,7 @@ OUTPUT_DIR = "output-pre-processor"
 
 # === SPLIT CONFIGURATION ===
 SPLIT_FILES = os.getenv("SPLIT_FILES", "yes")  # Set to "yes" to split into multiple files, "no" for single file
-ROWS_PER_FILE = os.getenv("ROWS_PER_FILE", 10000)  # Only used if SPLIT_FILES = "yes"
+ROWS_PER_FILE = int(os.getenv("ROWS_PER_FILE", 10000))  # Only used if SPLIT_FILES = "yes"
 
 # === EVIDENCE FORMATS ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
