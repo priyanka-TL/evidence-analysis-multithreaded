@@ -3,18 +3,35 @@ import csv
 import math
 from urllib.parse import urlparse
 from tqdm import tqdm  # Import tqdm for the progress bar
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Load environment variables from .env file (look in parent directory)
+env_path = Path(__file__).parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # === Configuration ===
-INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/other_types.csv"
+INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/alldata.csv"
 # INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/sample_haryana_custom_task.csv"
 QUESTION_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/questions.csv"
 FILTER_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/school_list.csv"
-USE_SCHOOL_FILTER = os.getenv("USE_SCHOOL_FILTER", False)  # Set to True to filter by school_list.csv, False to skip this filter
+def str2bool(val):
+    return str(val).lower() in ("1", "true", "yes")
+
+USE_SCHOOL_FILTER = str2bool(os.getenv("USE_SCHOOL_FILTER", False))  # Set to True to filter by school_list.csv, False to skip this filter
 OUTPUT_DIR = "output-pre-processor"
 
 # === SPLIT CONFIGURATION ===
 SPLIT_FILES = os.getenv("SPLIT_FILES", "yes")  # Set to "yes" to split into multiple files, "no" for single file
-ROWS_PER_FILE = int(os.getenv("ROWS_PER_FILE", 10000))  # Only used if SPLIT_FILES = "yes"
+ROWS_PER_FILE = 10000
+# int(os.getenv("ROWS_PER_FILE", 10000))  # Only used if SPLIT_FILES = "yes"
+
+# Debug: Print loaded configuration
+print(f"🔧 Configuration Loaded:")
+print(f"   SPLIT_FILES: {SPLIT_FILES}")
+print(f"   ROWS_PER_FILE: {ROWS_PER_FILE}")
+print(f"   USE_SCHOOL_FILTER: {USE_SCHOOL_FILTER}")
+print()
 
 # === EVIDENCE FORMATS ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}

@@ -1,13 +1,19 @@
 import csv
 import os
 from math import ceil
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Load environment variables from .env file (look in parent directory)
+env_path = Path(__file__).parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # Configuration
 INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/pre-processor/output-pre-processor/split_1.csv"
 OUTPUT_DIR = "parallel_input_split_1_files"
 # no of rows to split into
-PARTS = 5
-
+PARTS = int(os.getenv("ROWS_PER_FILE", 5))
+print(PARTS, os.getenv("ROWS_PER_FILE"))
 # Create output directory if it doesn't exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 

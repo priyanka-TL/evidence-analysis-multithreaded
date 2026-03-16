@@ -740,8 +740,7 @@
                     <div class="chart-container">
                         <div class="chart-title" id="stateMapTitle">State District Relevance Map</div>
                         <div id="stateMap"
-                            style="min-height: 400px; display: flex; justify-content: center; align-items: center; background-color: #eef; border-radius: 8px;">
-                            <span class="text-gray-500">Map placeholder area</span>
+                            style="min-height: 400px; display: flex; justify-content: center; align-items: center; border-radius: 8px;">
                         </div>
                         <div
                             style="display: flex; justify-content: center; gap: 20px; margin-top: 20px; flex-wrap: wrap; font-size: 14px;">
@@ -764,6 +763,25 @@
                         </div>
                     </div>
 
+                </div>
+
+                <!-- TOP N RELEVANCE HIERARCHY SECTION -->
+                <div class="report-section section-to-break">
+                    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:10px;">
+                        <h2 class="section-title" style="margin:0;border:none;padding:0;">🏆 Top Relevance Hierarchy</h2>
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <label for="topNSelect" style="font-weight:600;color:#4a5568;font-size:0.9em;white-space:nowrap;">Show top:</label>
+                            <select id="topNSelect" onchange="refreshTopHierarchy()" style="padding:8px 14px;border:2px solid #cbd5e0;border-radius:8px;font-size:1em;background:white;cursor:pointer;transition:border-color 0.3s;">
+                                <option value="5" selected>Top 5</option>
+                                <option value="10">Top 10</option>
+                                <option value="15">Top 15</option>
+                            </select>
+                        </div>
+                    </div>
+                    <p id="topNDescription" style="text-align:center;color:#718096;margin-bottom:20px;">
+                        Top 5 Districts → within each, Top 5 Blocks → Top 5 Schools → Top 5 Teachers · ranked by Relevance %
+                    </p>
+                    <div id="topRelevanceHierarchy"></div>
                 </div>
 
                 <!-- ENROLLMENT ANALYTICS SECTION (Only shown if enrollment data exists) -->
@@ -1758,6 +1776,10 @@
 
             generateStateMap(districtStats, primaryState);
 
+            // Top N Relevance Hierarchy — cache data so the selector can re-render without reprocessing
+            window._hierRawData = data;
+            generateTopRelevanceHierarchy(data);
+
             // NEW: Generate enrollment analytics if data exists (Configurable: Conditional on data presence)
 
             console.log('Enrollment check:', {
@@ -1789,6 +1811,200 @@
             } else {
                 console.log('Hiding custom tasks section - state does not require custom task tracking');
                 document.getElementById('userOwnedTasksSection').classList.add('hidden');
+            }
+        }
+
+        // TOP 5 RELEVANCE HIERARCHY
+        function refreshTopHierarchy() {
+            if (window._hierRawData) {
+                const n = parseInt(document.getElementById('topNSelect').value, 10);
+                const desc = document.getElementById('topNDescription');
+                if (desc) desc.textContent = `Top ${n} Districts → within each, Top ${n} Blocks → Top ${n} Schools → Top ${n} Teachers · ranked by Relevance %`;
+                generateTopRelevanceHierarchy(window._hierRawData);
+            }
+        }
+
+        function generateTopRelevanceHierarchy(data) {
+            const TOP_N = parseInt((document.getElementById('topNSelect') || {}).value || '5', 10);
+
+            function relScore(tag) {
+                if (tag === 'Relevant') return 1.0;
+                if (tag === 'Partially Relevant') return 0.5;
+                return 0.0;
+            }
+
+            // Build the full hierarchy
+            const hier = {};
+            data.forEach(row => {
+                const dist   = (row['District']    || 'Unknown').trim();
+                const blk    = (row['Block']        || 'Unknown').trim();
+                const school = (row['School Name']  || 'Unknown').trim();
+                const uuid   = (row['UUID']          || 'Unknown').trim();
+                const score  = relScore((row['Relevance Tag'] || '').trim());
+
+                if (!hier[dist]) hier[dist] = { score: 0, total: 0, blocks: {} };
+                hier[dist].score += score; hier[dist].total++;
+
+                if (!hier[dist].blocks[blk]) hier[dist].blocks[blk] = { score: 0, total: 0, schools: {} };
+                hier[dist].blocks[blk].score += score; hier[dist].blocks[blk].total++;
+
+                const blkNode = hier[dist].blocks[blk];
+                if (!blkNode.schools[school]) blkNode.schools[school] = { score: 0, total: 0, teachers: {} };
+                blkNode.schools[school].score += score; blkNode.schools[school].total++;
+
+                const schNode = blkNode.schools[school];
+                if (!schNode.teachers[uuid]) schNode.teachers[uuid] = { score: 0, total: 0 };
+                schNode.teachers[uuid].score += score; schNode.teachers[uuid].total++;
+            });
+
+            function pct(node) { return node.total > 0 ? (node.score / node.total) * 100 : 0; }
+            function topN(obj) {
+                return Object.entries(obj)
+                    .map(([name, node]) => ({ name, node, pct: pct(node) }))
+                    .sort((a, b) => b.pct - a.pct || b.node.total - a.node.total)
+                    .slice(0, TOP_N);
+            }
+
+            // Use the same global table + th styles as the rest of the report
+            let html = `<table>
+                <thead><tr>
+                    <th>District / Block / School / Teacher</th>
+                    <th>Total Evidence</th>
+                    <th>% Relevant</th>
+                </tr></thead>
+                <tbody>`;
+
+            topN(hier).forEach((d, di) => {
+                const dId = d.name.replace(/[^a-zA-Z0-9]/g, '_');
+                html += `
+                <tr class="district-row" onclick="toggleTopDist('${d.name.replace(/'/g, "\\'")}')">
+                    <td class="clickable-cell">
+                        <div class="expandable-name">
+                            <span class="expand-arrow" id="arrow-top-d-${dId}"></span>
+                            <strong>#${di + 1}&nbsp;&nbsp;${d.name}</strong>
+                        </div>
+                    </td>
+                    <td>${d.node.total.toLocaleString()}</td>
+                    <td><span class="percentage-badge">${d.pct.toFixed(1)}%</span></td>
+                </tr>`;
+
+                topN(d.node.blocks).forEach((b, bi) => {
+                    const bId = b.name.replace(/[^a-zA-Z0-9]/g, '_');
+                    html += `
+                <tr class="block-row hidden-row top-d-${dId}" onclick="toggleTopBlock(event,'${d.name.replace(/'/g, "\\'")}','${b.name.replace(/'/g, "\\'")}')">
+                    <td class="indent-1 clickable-cell">
+                        <div class="expandable-name">
+                            <span class="expand-arrow" id="arrow-top-b-${dId}-${bId}"></span>
+                            <span>#${bi + 1}&nbsp;&nbsp;${b.name}</span>
+                        </div>
+                    </td>
+                    <td>${b.node.total.toLocaleString()}</td>
+                    <td><span class="percentage-badge">${b.pct.toFixed(1)}%</span></td>
+                </tr>`;
+
+                    topN(b.node.schools).forEach((s, si) => {
+                        const sId = s.name.replace(/[^a-zA-Z0-9]/g, '_');
+                        html += `
+                <tr class="school-row hidden-row top-b-${dId}-${bId}" onclick="toggleTopSchool(event,'${d.name.replace(/'/g, "\\'")}','${b.name.replace(/'/g, "\\'")}','${s.name.replace(/'/g, "\\'")}')">
+                    <td class="indent-2 clickable-cell">
+                        <div class="expandable-name">
+                            <span class="expand-arrow" id="arrow-top-s-${dId}-${bId}-${sId}"></span>
+                            <span>#${si + 1}&nbsp;&nbsp;${s.name}</span>
+                        </div>
+                    </td>
+                    <td>${s.node.total.toLocaleString()}</td>
+                    <td><span class="percentage-badge">${s.pct.toFixed(1)}%</span></td>
+                </tr>`;
+
+                        topN(s.node.teachers).forEach((t, ti) => {
+                            html += `
+                <tr class="hidden-row top-s-${dId}-${bId}-${sId}" style="background:#fffbf0;">
+                    <td style="padding-left:90px;">
+                        <div class="expandable-name">
+                            <span>👤</span>
+                            <span style="color:#718096;">#${ti + 1}</span>
+                            <code style="font-size:0.85em;color:#4a5568;background:#eef2ff;padding:2px 8px;border-radius:4px;">${t.name}</code>
+                        </div>
+                    </td>
+                    <td>${t.node.total.toLocaleString()}</td>
+                    <td><span class="percentage-badge">${t.pct.toFixed(1)}%</span></td>
+                </tr>`;
+                        });
+                    });
+                });
+            });
+
+            html += '</tbody></table>';
+            document.getElementById('topRelevanceHierarchy').innerHTML = html;
+        }
+
+        function toggleTopDist(districtName) {
+            const dId = districtName.replace(/[^a-zA-Z0-9]/g, '_');
+            const arrow = document.getElementById(`arrow-top-d-${dId}`);
+            const distRow = arrow.closest('tr');
+            const isExpanded = !arrow.classList.contains('rotated');
+
+            if (isExpanded) {
+                arrow.classList.add('rotated');
+                distRow.classList.add('expanded');
+                document.querySelectorAll(`.top-d-${dId}`).forEach(r => r.classList.remove('hidden-row'));
+            } else {
+                arrow.classList.remove('rotated');
+                distRow.classList.remove('expanded');
+                document.querySelectorAll(`.top-d-${dId}`).forEach(r => {
+                    r.classList.add('hidden-row');
+                    const ba = r.querySelector('.expand-arrow');
+                    if (ba) ba.classList.remove('rotated');
+                    r.classList.remove('expanded');
+                });
+                document.querySelectorAll(`[class*="top-b-${dId}-"], [class*="top-s-${dId}-"]`)
+                    .forEach(r => r.classList.add('hidden-row'));
+            }
+        }
+
+        function toggleTopBlock(event, districtName, blockName) {
+            event.stopPropagation();
+            const dId = districtName.replace(/[^a-zA-Z0-9]/g, '_');
+            const bId = blockName.replace(/[^a-zA-Z0-9]/g, '_');
+            const arrow = document.getElementById(`arrow-top-b-${dId}-${bId}`);
+            const blockRow = arrow.closest('tr');
+            const isExpanded = !arrow.classList.contains('rotated');
+
+            if (isExpanded) {
+                arrow.classList.add('rotated');
+                blockRow.classList.add('expanded');
+                document.querySelectorAll(`.top-b-${dId}-${bId}`).forEach(r => r.classList.remove('hidden-row'));
+            } else {
+                arrow.classList.remove('rotated');
+                blockRow.classList.remove('expanded');
+                document.querySelectorAll(`.top-b-${dId}-${bId}`).forEach(r => {
+                    r.classList.add('hidden-row');
+                    const sa = r.querySelector('.expand-arrow');
+                    if (sa) sa.classList.remove('rotated');
+                    r.classList.remove('expanded');
+                });
+                document.querySelectorAll(`[class*="top-s-${dId}-${bId}-"]`)
+                    .forEach(r => r.classList.add('hidden-row'));
+            }
+        }
+
+        function toggleTopSchool(event, districtName, blockName, schoolName) {
+            event.stopPropagation();
+            const dId = districtName.replace(/[^a-zA-Z0-9]/g, '_');
+            const bId = blockName.replace(/[^a-zA-Z0-9]/g, '_');
+            const sId = schoolName.replace(/[^a-zA-Z0-9]/g, '_');
+            const arrow = document.getElementById(`arrow-top-s-${dId}-${bId}-${sId}`);
+            const schoolRow = arrow.closest('tr');
+            const isExpanded = !arrow.classList.contains('rotated');
+
+            if (isExpanded) {
+                arrow.classList.add('rotated');
+                schoolRow.classList.add('expanded');
+                document.querySelectorAll(`.top-s-${dId}-${bId}-${sId}`).forEach(r => r.classList.remove('hidden-row'));
+            } else {
+                arrow.classList.remove('rotated');
+                schoolRow.classList.remove('expanded');
+                document.querySelectorAll(`.top-s-${dId}-${bId}-${sId}`).forEach(r => r.classList.add('hidden-row'));
             }
         }
 
@@ -2697,33 +2913,30 @@
                 reader.readAsText(geojsonFile);
             } else if (stateGeojsonUrls[stateKey]) {
                 const geojsonUrl = stateGeojsonUrls[stateKey];
-                document.getElementById('stateMap').innerHTML = '<p style="text-align: center; color: #718096; padding: 20px;">Loading map...</p>';
+                document.getElementById('stateMap').innerHTML = '<p style="text-align:center;color:#718096;padding:20px;">⏳ Loading map...</p>';
                 fetch(geojsonUrl, { mode: 'cors', headers: { 'Accept': 'application/json' } })
                     .then(response => {
-                        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
                         return response.json();
                     })
-                    .then(geojson => { renderStateMap(geojson, districtStats, stateName); })
+                    .then(geojson => {
+                        try {
+                            renderStateMap(geojson, districtStats, stateName);
+                        } catch (renderErr) {
+                            console.error('renderStateMap error:', renderErr);
+                            generateSimplifiedStateMap();
+                        }
+                    })
                     .catch(error => {
-                        console.error(`Error loading ${stateName} GeoJSON:`, error);
-                        document.getElementById('stateMap').innerHTML = `
-                        <div style="text-align: center; padding: 20px;">
-                            <p style="color: #718096; margin-bottom: 10px;">Unable to load ${stateName} map.</p>
-                            <p style="color: #718096; font-size: 0.9em; margin-bottom: 10px;">Please upload the ${stateKey}.geojson file and process again.</p>
-                            <button onclick="generateSimplifiedStateMap()" style="margin-top: 10px; padding: 8px 16px; background: #4facfe; color: white; border: none; border-radius: 5px; cursor: pointer;">Or Load Simplified Map</button>
-                        </div>
-                    `;
+                        console.warn(`Failed to fetch ${stateName} GeoJSON (${error.message}), falling back to simplified map.`);
+                        generateSimplifiedStateMap();
                     });
             } else {
-                // State not supported, show simplified map
-                document.getElementById('stateMap').innerHTML = `
-                <div style="text-align: center; padding: 20px;">
-                    <p style="color: #718096; margin-bottom: 10px;">${stateName} map not available.</p>
-                    <button onclick="generateSimplifiedStateMap()" style="margin-top: 10px; padding: 8px 16px; background: #4facfe; color: white; border: none; border-radius: 5px; cursor: pointer;">Load Simplified Map</button>
-                </div>
-            `;
+                // State not in URL map — fall back to simplified map automatically
+                generateSimplifiedStateMap();
             }
         }
+
 
         window.generateSimplifiedStateMap = function () {
             renderSimplifiedStateMap(window.currentDistrictStats || {});
@@ -2916,18 +3129,12 @@
             loadingDiv.innerHTML = '<div><div class="spinner" style="border: 4px solid #f3f3f3; border-top: 4px solid #4facfe; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto 20px;"></div>Generating PDF...</div>';
             document.body.appendChild(loadingDiv);
 
-            const mapContainer = document.getElementById('stateMap');
-            const originalMapHTML = mapContainer ? mapContainer.innerHTML : '';
-
-            if (mapContainer) {
-                mapContainer.innerHTML = `
-                <div style="width: 100%; height: 500px; display: flex; align-items: center; justify-content: center; background: #f8f9fa; border: 1px dashed #ccc; border-radius: 8px;">
-                    <p style="color: #666; font-size: 16px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
-                        Map is available in the interactive HTML report.
-                    </p>
-                </div>
-            `;
-            }
+            // Expand all rows in the Top 5 Hierarchy so they appear in the PDF
+            const hierContainer = document.getElementById('topRelevanceHierarchy');
+            const hiddenHierRows = hierContainer
+                ? Array.from(hierContainer.querySelectorAll('tr.hidden-row'))
+                : [];
+            hiddenHierRows.forEach(r => r.classList.remove('hidden-row'));
 
             setTimeout(() => {
                 const contentWidthPx = element.offsetWidth;
@@ -2959,10 +3166,9 @@
                 };
 
                 html2pdf().set(opt).from(element).save().finally(() => {
-                    if (mapContainer && originalMapHTML) {
-                        mapContainer.innerHTML = originalMapHTML;
-                        addTooltipHandlers();
-                    }
+                    // Restore collapsed hierarchy rows
+                    hiddenHierRows.forEach(r => r.classList.add('hidden-row'));
+
                     if (loadingDiv) loadingDiv.remove();
                 });
             }, 100);
