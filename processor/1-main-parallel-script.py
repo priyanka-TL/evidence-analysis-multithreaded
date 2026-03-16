@@ -43,6 +43,11 @@ CHECKPOINT_CLEANUP_ON_SUCCESS = os.getenv("CHECKPOINT_CLEANUP_ON_SUCCESS", "True
 # === STATE CONFIGURATION (from .env) ===
 STATE_NAME = os.getenv("STATE_NAME", "HARYANA")  # Default: HARYANA
 
+# === QUESTIONS FILE CONFIGURATION (from .env) ===
+# Path to the CSV containing standard task names and their evaluation questions.
+# Relative to the processor/ directory. Defaults to the Haryana question sheet.
+QUESTIONS_FILE = os.getenv("QUESTIONS_FILE", "../input/question.csv")
+
 # === RELEVANCE SCORING CONFIGURATION ===
 # BIHAR: Use "strict" mode (YES/NO answers only, descriptive content ignored)
 # HARYANA: Use "mixed" mode (considers both YES/NO and descriptive quality)
@@ -1450,7 +1455,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         checkpoint_save_counter = 0
 
         # Load questions mapping
-        questions_file = "../input/questions.csv"
+        questions_file = QUESTIONS_FILE
         questions_map = load_questions_mapping(questions_file)
 
         df = pd.read_excel(input_file) if input_file.endswith(".xlsx") else pd.read_csv(input_file)

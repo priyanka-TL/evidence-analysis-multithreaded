@@ -11,9 +11,9 @@ env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
 # === Configuration ===
-INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/alldata.csv"
+INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/test.csv"
 # INPUT_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/sample_haryana_custom_task.csv"
-QUESTION_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/questions.csv"
+QUESTION_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/question.csv"
 FILTER_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-multithreaded/input/school_list.csv"
 def str2bool(val):
     return str(val).lower() in ("1", "true", "yes")
@@ -23,8 +23,8 @@ OUTPUT_DIR = "output-pre-processor"
 
 # === SPLIT CONFIGURATION ===
 SPLIT_FILES = os.getenv("SPLIT_FILES", "yes")  # Set to "yes" to split into multiple files, "no" for single file
-ROWS_PER_FILE = 10000
-# int(os.getenv("ROWS_PER_FILE", 10000))  # Only used if SPLIT_FILES = "yes"
+ROWS_PER_FILE = 15000
+# int(os.getenv("ROWS_PER_FILE", 15000))  # Only used if SPLIT_FILES = "yes"
 
 # Debug: Print loaded configuration
 print(f"🔧 Configuration Loaded:")
