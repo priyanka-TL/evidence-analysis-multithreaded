@@ -20,13 +20,20 @@ import threading
 import time
 from collections import deque
 
-# === Constants ===
+# Resolve project root (one level above this script's processor/ directory)
+_SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
+
+# === Constants (all configurable via .env) ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
-MAX_PROCESSED_ROWS = 520
-# OUTPUT_FILE = "processed_output.csv" # Not used
-INPUT_DIR = "parallel_input_split_1_files"
-OUTPUT_DIR = "parallel_output_split_1_files"
-FINAL_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "merged_output.csv")
+MAX_PROCESSED_ROWS       = int(os.getenv("MAX_PROCESSED_ROWS", "20000"))
+# Relative paths from env are resolved against the project root
+INPUT_DIR                = os.path.join(_PROJECT_ROOT, os.getenv("INPUT_DIR", "parallel_input_split_1_files"))
+OUTPUT_DIR               = os.path.join(_PROJECT_ROOT, os.getenv("OUTPUT_DIR", "parallel_output_split_1_files"))
+FINAL_OUTPUT_FILE        = os.path.join(OUTPUT_DIR, os.getenv("FINAL_OUTPUT_FILENAME", "merged_output.csv"))
+ENABLE_RELEVANT_CAP      = os.getenv("ENABLE_RELEVANT_CAP", "true").strip().lower() == "true"
+MAX_RELEVANT_PER_USER_TASK = int(os.getenv("MAX_RELEVANT_PER_USER_TASK", "2"))
+GEMINI_MODEL             = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-001")
 
 # Create output directory if it doesn't exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -87,7 +94,7 @@ def switch_to_next_token():
         genai.configure(api_key=token)
         global model
         model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
+            model_name=GEMINI_MODEL,
             generation_config={
                 "response_mime_type": "application/json",
                 "response_schema": AnalysisResponse,
@@ -107,7 +114,7 @@ if not initial_token:
 
 genai.configure(api_key=initial_token)
 model = genai.GenerativeModel(
-    model_name="gemini-2.0-flash",
+    model_name=GEMINI_MODEL,
     generation_config={
         "response_mime_type": "application/json",
         "response_schema": AnalysisResponse,
@@ -164,7 +171,7 @@ def get_image_as_base64(url: str) -> str:
 # Track timestamps of recent requests
 _request_times = deque()
 _request_lock = threading.Lock()
-MAX_REQUESTS_PER_MINUTE = 2000
+MAX_REQUESTS_PER_MINUTE = int(os.getenv("MAX_REQUESTS_PER_MINUTE", "2000"))
 
 def rate_limiter():
     """Block until we are under the 2000 req/min limit."""
@@ -239,28 +246,54 @@ def main(input_file, worker_id=None):
             & ~df["Task Evidence Question"].isin([None, "Null"])
         ].dropna(subset=["Task Evidence", "Task Evidence Question"])
 
+        # Sort by (UUID, Tasks) so all evidences for the same user+task are contiguous.
+        # Safety net in case the input file was not pre-sorted by the splitter pipeline.
+        if "UUID" in df_filtered.columns and "Tasks" in df_filtered.columns:
+            df_filtered = df_filtered.sort_values(
+                by=["UUID", "Tasks"], kind="stable"
+            ).reset_index(drop=True)
+
         processed_count = 0
         task_evidence_qa = []
         task_evidence_qa_reason = []
         relevance_tags = []
+        relevant_count_per_key = {}  # (uuid, task) -> count of Relevant tags assigned
 
         for idx, row in df_filtered.iterrows():
             task_evidence = str(row["Task Evidence"]).strip()
             task_question = str(row["Task Evidence Question"]).strip()
+            uuid = str(row.get("UUID", "")).strip()
+            task = str(row.get("Tasks", "")).strip()
+            key = (uuid, task)
+
+            # If cap is enabled and this (UUID, Tasks) pair already has enough Relevant evidences, skip API call.
+            if ENABLE_RELEVANT_CAP and relevant_count_per_key.get(key, 0) >= MAX_RELEVANT_PER_USER_TASK:
+                logging.info(f"[Worker {worker_id}] Skipping row {idx+1} — (UUID, Tasks) already has {MAX_RELEVANT_PER_USER_TASK} Relevant evidences")
+                task_evidence_qa.append(None)
+                task_evidence_qa_reason.append(None)
+                relevance_tags.append('notValidated')
+                processed_count += 1
+                if processed_count >= MAX_PROCESSED_ROWS:
+                    logging.info(f"[Worker {worker_id}] Reached max processed rows ({MAX_PROCESSED_ROWS})")
+                    break
+                continue
 
             if any(task_evidence.lower().endswith(ext) for ext in IMAGE_FORMATS):
                 logging.info(f"[Worker {worker_id}] Processing image row {idx+1}/{len(df_filtered)}")
-                
+
                 api_calls += 1  # ✅ Track API call attempt
                 response = process_image(task_evidence, task_question)
-                
+
                 if isinstance(response, dict) and "answers" in response and "reasonings" in response:
                     answers = response["answers"]
                     reasonings = response["reasonings"]
+                    tag = calculate_relevance_tag(answers)
                     task_evidence_qa.append(answers)
                     task_evidence_qa_reason.append(reasonings)
-                    relevance_tags.append(calculate_relevance_tag(answers))
-                    
+                    relevance_tags.append(tag)
+                    if tag == 'Relevant':
+                        relevant_count_per_key[key] = relevant_count_per_key.get(key, 0) + 1
+
                     api_successes += 1 # ✅ Track success
                     success_list.append(task_evidence) # ✅ Add to success list
                 else:
@@ -268,7 +301,7 @@ def main(input_file, worker_id=None):
                     task_evidence_qa.append(None)
                     task_evidence_qa_reason.append(None)
                     relevance_tags.append('Irrelevant')
-                    
+
                     api_failures += 1 # ✅ Track failure
                     failed_list.append(task_evidence) # ✅ Add to failed list
             else:
@@ -296,6 +329,8 @@ def main(input_file, worker_id=None):
         
         logging.info(f"[Worker {worker_id}] Finished processing {input_file}. Output: {output_filename}")
 
+        not_validated_count = sum(1 for t in relevance_tags if t == 'notValidated')
+
         # ✅ Return the dictionary of stats
         return {
             "output_file": output_filename,
@@ -303,6 +338,7 @@ def main(input_file, worker_id=None):
             "api_calls": api_calls,
             "api_successes": api_successes,
             "api_failures": api_failures,
+            "not_validated": not_validated_count,
             "success_list": success_list,
             "failed_list": failed_list
         }
@@ -336,6 +372,7 @@ if __name__ == "__main__":
     total_api_calls_all = 0
     total_api_success_all = 0
     total_api_failure_all = 0
+    total_not_validated_all = 0
     all_success_lists = []
     all_failed_lists = []
     processed_files = [] # List of successful output file paths
@@ -357,6 +394,7 @@ if __name__ == "__main__":
                 total_api_calls_all += result_stats["api_calls"]
                 total_api_success_all += result_stats["api_successes"]
                 total_api_failure_all += result_stats["api_failures"]
+                total_not_validated_all += result_stats["not_validated"]
                 all_success_lists.extend(result_stats["success_list"])
                 all_failed_lists.extend(result_stats["failed_list"])
                 logging.info(f"[Main] Worker finished processing: {original_file}")
@@ -386,6 +424,7 @@ if __name__ == "__main__":
         logging.info(f"Total API Calls (image rows attempted): {total_api_calls_all}")
         logging.info(f"  - ✅ Success: {total_api_success_all}")
         logging.info(f"  - ❌ Failed: {total_api_failure_all}")
+        logging.info(f"  - ⏭️  Not Validated (cap reached): {total_not_validated_all}")
         
         logging.info("")
         logging.info(f"Total Input Files Processed Successfully: {len(processed_files)}")

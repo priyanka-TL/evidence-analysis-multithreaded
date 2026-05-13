@@ -1,18 +1,25 @@
 import os
 import csv
 import math
+import re
 from urllib.parse import urlparse
 from tqdm import tqdm  # Import tqdm for the progress bar
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
+
+# === Resolve paths relative to project root (one level above this script) ===
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 
 # === Configuration ===
-INPUT_CSV = "/Users/user/Documents/AI/parallel-process/input/017F35E575D87A3FB5ED3D90A3E69355_20250904.csv"
-QUESTION_CSV = "/Users/user/Documents/AI/parallel-process/input/aug_sample_questions.csv"
-FILTER_CSV = "/Users/user/Documents/AI/parallel-process/input/school_list.csv"
-OUTPUT_DIR = "output-pre-processor"
+INPUT_CSV    = os.path.join(_PROJECT_ROOT, "input.csv")
+QUESTION_CSV = os.path.join(_PROJECT_ROOT, "question.csv")
+FILTER_CSV   = os.path.join(_PROJECT_ROOT, "school_list.csv")   # optional — skip filter if file absent
+OUTPUT_DIR   = os.path.join(_PROJECT_ROOT, "output-pre-processor")
 
 # === SPLIT CONFIGURATION ===
-SPLIT_FILES = "yes"  # Set to "yes" to split into multiple files, "no" for single file
-ROWS_PER_FILE = 10000  # Only used if SPLIT_FILES = "yes"
+SPLIT_FILES = "no"    # Set to "yes" to split into multiple files, "no" for single file
+ROWS_PER_FILE = int(os.getenv("ROWS_PER_FILE", "10000"))  # Only used if SPLIT_FILES = "yes"
 
 # === IMAGE FORMATS ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
@@ -27,14 +34,20 @@ skip_school_mismatch = 0
 skip_non_image = 0
 total_input_rows = 0 # This will be set correctly below
 
-# === Step 1: Load FILTER_CSV school codes into a set ===
-valid_school_codes = set()
-with open(FILTER_CSV, newline='', encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        school_code = row.get("UDISE+ SCHOOL CODE", "").strip()
-        if school_code:
-            valid_school_codes.add(school_code)
+# === Step 1: Load FILTER_CSV school codes into a set (optional) ===
+# If school_list.csv does not exist, all school IDs are accepted.
+valid_school_codes = None  # None = accept all schools
+if os.path.exists(FILTER_CSV):
+    valid_school_codes = set()
+    with open(FILTER_CSV, newline='', encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            school_code = row.get("UDISE+ SCHOOL CODE", "").strip()
+            if school_code:
+                valid_school_codes.add(school_code)
+    print(f"✅ Loaded {len(valid_school_codes)} valid school codes from '{FILTER_CSV}'")
+else:
+    print(f"⚠️  '{FILTER_CSV}' not found — school ID filter disabled (all schools accepted)")
 
 # === Helper function for cleaning cell values ===
 def clean_cell(value):
@@ -57,15 +70,19 @@ def is_image_url(url):
     except:
         return False
 
-# === Step 2: Load QUESTION_CSV into dictionary (TASK NAME → Refined Question) ===
+# === Step 2: Load QUESTION_CSV into dictionary (task number → Refined Question) ===
+# Keyed by task number prefix (e.g. "2" for "2. शिक्षक कक्षा 6...") so that
+# partial-name differences between question.csv and input data don't break the lookup.
 lookup_dict = {}
 with open(QUESTION_CSV, newline='', encoding="utf-8") as f:
     reader = csv.DictReader(f)
     for row in reader:
         task_name = clean_cell(row.get("TASK NAME", ""))
         refined_question = row.get("Refined questions using tool and webpage", "").strip()
-        if task_name:  # only add valid rows
-            lookup_dict[task_name] = refined_question
+        if task_name:
+            match = re.match(r'^(\d+)\.', task_name)
+            key = match.group(1) if match else task_name  # fall back to full name
+            lookup_dict[key] = refined_question
 
 # === District Renaming Map ===
 DISTRICT_REPLACEMENTS = {
@@ -123,8 +140,8 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
     task = clean_cell(row.get("Tasks", "")) # Clean task for lookup
     evidence = row.get("Task Evidence", "") # Get raw evidence
 
-    # Rule 0: Skip if School ID not in FILTER_CSV
-    if school_id not in valid_school_codes:
+    # Rule 0: Skip if School ID not in FILTER_CSV (skipped when filter file is absent)
+    if valid_school_codes is not None and school_id not in valid_school_codes:
         skip_school_mismatch += 1
         continue
 
@@ -145,7 +162,10 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
         continue
 
     # === Step 4: Fill additional columns & Clean District ===
-    row["Task Evidence Question"] = lookup_dict.get(task, "Null")
+    # Look up by task number prefix first, fall back to full name, then "Null"
+    task_num_match = re.match(r'^(\d+)\.', task)
+    task_key = task_num_match.group(1) if task_num_match else task
+    row["Task Evidence Question"] = lookup_dict.get(task_key, "Null")
     row["Task evidence Q and A"] = ""
     row["Task evidence Q and A Reason"] = ""
     row["Relevance Tag"] = ""
@@ -157,6 +177,16 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
 
     # Row passes all checks
     filtered_rows.append([row.get(h, "") for h in final_header])
+
+# === Step 4b: Sort by (UUID, Tasks) so all evidences for the same user+task are contiguous ===
+# This is required for correct group-aware splitting and per-file Relevant capping.
+try:
+    uuid_idx = final_header.index("UUID")
+    task_idx = final_header.index("Tasks")
+    filtered_rows.sort(key=lambda r: (str(r[uuid_idx]), str(r[task_idx])))
+    print("✅ Sorted output rows by (UUID, Tasks) for group-aware splitting.")
+except ValueError:
+    print("⚠️  UUID or Tasks column not found — output not sorted by user+task.")
 
 # === Step 5: Output - Single file or Multiple files based on configuration ===
 if SPLIT_FILES.lower() == "no":
@@ -221,7 +251,7 @@ print(f"{'='*70}")
 print("This script performed the following actions:")
 
 print("\n--- 1. PRE-LOADING ---")
-print(f"✅ Loaded valid school codes from '{FILTER_CSV}'")
+print(f"✅ School filter: {'loaded from ' + FILTER_CSV if valid_school_codes is not None else 'disabled (school_list.csv not found)'}")
 print(f"✅ Loaded task/question map from '{QUESTION_CSV}'")
 print("✅ Defined district name replacements (e.g., 'W. Champaran' -> 'West Champaran')")
 
