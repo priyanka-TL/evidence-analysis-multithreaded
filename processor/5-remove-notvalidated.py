@@ -1,9 +1,12 @@
 import os
 import pandas as pd
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # ==== CONFIG ====
-INPUT_CSV = "path/to/merged_output.csv"   # Path to the merged output CSV to clean
-OUTPUT_DIR = "path/to/output"             # Directory to write the cleaned file
+_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
+INPUT_CSV = os.path.join(_PROJECT_ROOT, "merged_output.csv") # Path to the merged output CSV to clean
+OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "output")             # Directory to write the cleaned file
 OUTPUT_FILE = "final_cleaned_output.csv"  # Name of the cleaned output file
 NOT_VALIDATED_TAG = "notValidated"        # Relevance Tag value to remove
 

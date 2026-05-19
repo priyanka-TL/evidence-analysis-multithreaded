@@ -19,7 +19,7 @@ OUTPUT_DIR   = os.path.join(_PROJECT_ROOT, "output-pre-processor")
 
 # === SPLIT CONFIGURATION ===
 SPLIT_FILES = "no"    # Set to "yes" to split into multiple files, "no" for single file
-ROWS_PER_FILE = int(os.getenv("ROWS_PER_FILE", "10000"))  # Only used if SPLIT_FILES = "yes"
+ROWS_PER_FILE = int(os.getenv("ROWS_PER_FILE", "300000"))  # Only used if SPLIT_FILES = "yes"
 
 # === IMAGE FORMATS ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
@@ -146,7 +146,7 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
         continue
 
     # Rule 1: Skip if task starts with 1 or 8
-    if task.startswith("1") or task.startswith("8"):
+    if task.startswith("1") or task.startswith("8") or task.startswith("9"):
         skip_task_start += 1
         continue
 

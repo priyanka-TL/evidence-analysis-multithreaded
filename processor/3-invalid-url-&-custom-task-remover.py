@@ -4,8 +4,8 @@ import re
 from pathlib import Path
 
 # ==== CONFIG ====
-INPUT_CSV = "/Users/user/Documents/AI/output/TEST/merged_output.csv"
-OUTPUT_DIR = "/Users/user/Documents/AI/output/TEST"
+INPUT_CSV = "/Users/priyankapradeep/Desktop/evidence-analysis-multithreaded/parallel_output_split_1_files/merged_output.csv"
+OUTPUT_DIR = "/Users/priyankapradeep/Desktop/evidence-analysis-multithreaded/output"
 OUTPUT_FILE = "final_output.csv"
 
 # Column names to check for null/empty values

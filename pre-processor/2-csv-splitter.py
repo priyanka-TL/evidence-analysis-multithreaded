@@ -12,7 +12,7 @@ load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 # Configuration
 INPUT_CSV  = os.path.join(_PROJECT_ROOT, "output-pre-processor", "preprocessed_data.csv")
 OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "parallel_input_split_1_files")
-PARTS = int(os.getenv("PARTS", "5"))
+PARTS = int(os.getenv("PARTS", "80"))
 
 # Create output directory if it doesn't exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
