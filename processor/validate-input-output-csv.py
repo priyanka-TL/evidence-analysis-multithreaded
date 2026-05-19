@@ -6,8 +6,12 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 
 # ==== CONFIG ====
-input_path  = os.path.join(_PROJECT_ROOT, "parallel_output_split_1_files", "merged_output.csv")
-output_path = os.path.join(_PROJECT_ROOT, "parallel_output_split_1_files", "final_output.csv")
+# Override with env vars to validate a specific split in Mode B:
+#   VALIDATE_INPUT=parallel_output_split_2_files/merged_output.csv python processor/validate-input-output-csv.py
+_default_input = os.path.join("parallel_output_split_1_files", "merged_output.csv")
+input_path  = os.path.join(_PROJECT_ROOT, os.environ.get("VALIDATE_INPUT",  _default_input))
+output_path = os.path.join(_PROJECT_ROOT, os.environ.get("VALIDATE_OUTPUT",
+                 os.path.join("parallel_output_split_1_files", "final_output.csv")))
 
 # ==== LOAD ====
 df = pd.read_csv(input_path, dtype=str)

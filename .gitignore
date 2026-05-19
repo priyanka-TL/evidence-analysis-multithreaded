@@ -128,11 +128,20 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Project-specific outputs and data
+# Project-specific outputs and data (large generated files — do not commit)
 output-pre-processor/
-*.csv  # Ignore generated CSVs; adjust if some are committed
-processor/url.txt  # If this is generated; otherwise remove
-webpage/static/  # If webpage has generated static files
+parallel_input_split_*/
+parallel_output_split_*/
+output/
+input_backups/
+output_backups/
+
+# Input data files (may contain sensitive/large data)
+input.csv
+
+# Generated processor artifacts
+processor/url.txt
+webpage/static/
 
 # IDE
 .vscode/

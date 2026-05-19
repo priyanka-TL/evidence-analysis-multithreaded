@@ -3,9 +3,16 @@ import pandas as pd
 import re
 from pathlib import Path
 
+# Resolve paths relative to project root (one level above this script)
+_SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
+
 # ==== CONFIG ====
-INPUT_CSV = "/Users/priyankapradeep/Desktop/evidence-analysis-multithreaded/parallel_output_split_1_files/merged_output.csv"
-OUTPUT_DIR = "/Users/priyankapradeep/Desktop/evidence-analysis-multithreaded/output"
+INPUT_CSV  = os.path.join(_PROJECT_ROOT,
+                 os.environ.get("CLEANER_INPUT_CSV",
+                     "parallel_output_split_1_files/merged_output.csv"))
+OUTPUT_DIR = os.path.join(_PROJECT_ROOT,
+                 os.environ.get("CLEANER_OUTPUT_DIR", "output"))
 OUTPUT_FILE = "final_output.csv"
 
 # Column names to check for null/empty values

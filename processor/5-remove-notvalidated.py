@@ -5,8 +5,11 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ==== CONFIG ====
 _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
-INPUT_CSV = os.path.join(_PROJECT_ROOT, "merged_output.csv") # Path to the merged output CSV to clean
-OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "output")             # Directory to write the cleaned file
+INPUT_CSV  = os.path.join(_PROJECT_ROOT,
+                 os.environ.get("REMOVE_NOTVAL_INPUT",
+                     "parallel_output_split_1_files/merged_output.csv"))
+OUTPUT_DIR = os.path.join(_PROJECT_ROOT,
+                 os.environ.get("REMOVE_NOTVAL_OUTPUT_DIR", "output"))
 OUTPUT_FILE = "final_cleaned_output.csv"  # Name of the cleaned output file
 NOT_VALIDATED_TAG = "notValidated"        # Relevance Tag value to remove
 

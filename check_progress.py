@@ -1,12 +1,18 @@
 import os
 import csv
 from datetime import datetime
+from dotenv import load_dotenv
 
 # Must be raised before any csv.reader usage; prevents crashes on large Gemini reasoning fields
 csv.field_size_limit(10_000_000)
 
-INPUT_DIR  = "/Users/priyankapradeep/Desktop/evidence-analysis-multithreaded/parallel_input_split_1_files"
-OUTPUT_DIR = "/Users/priyankapradeep/Desktop/evidence-analysis-multithreaded/parallel_output_split_1_files"
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
+
+# Override with env vars to monitor a specific split in Mode B:
+#   INPUT_DIR=parallel_input_split_2_files  OUTPUT_DIR=parallel_output_split_2_files  python check_progress.py
+INPUT_DIR  = os.path.join(_PROJECT_ROOT, os.environ.get("INPUT_DIR",  "parallel_input_split_1_files"))
+OUTPUT_DIR = os.path.join(_PROJECT_ROOT, os.environ.get("OUTPUT_DIR", "parallel_output_split_1_files"))
 
 def row_count(path):
     if not os.path.exists(path):
@@ -18,6 +24,23 @@ def row_count(path):
         print(f"  [WARN] Cannot read {os.path.basename(path)}: {e}")
         return -1   # Negative = unreadable, distinct from 0 rows
 
+# Guard: input dir must exist (sub-splits created by 2-csv-splitter.py)
+if not os.path.isdir(INPUT_DIR):
+    print(f"\nERROR: Input directory not found: {INPUT_DIR}")
+    print("  Run the csv-splitter first:  python pre-processor/2-csv-splitter.py")
+    print("  Or run the orchestrator:     python run-split-pipeline.py\n")
+    exit(1)
+
+# Output dir may not exist yet — processor creates it when it starts
+if not os.path.isdir(OUTPUT_DIR):
+    print(f"\nNOTE: Output directory not found: {OUTPUT_DIR}")
+    print("  The processor has not started yet (or has not created any output).")
+    print("  Run the processor:  python processor/1-main-parallel-script.py")
+    print("  Or run the orchestrator:  python run-split-pipeline.py")
+    print("  Progress will appear here once processing begins.\n")
+    # Still show input stats so the user knows what will be processed
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 # Discover all numeric input files dynamically (handles 1–80 and 81–130 after split)
 split_nums = sorted(
     int(os.path.splitext(f)[0])
@@ -25,12 +48,7 @@ split_nums = sorted(
     if f.endswith(".csv") and os.path.splitext(f)[0].isdigit()
 )
 
-# Read GEMINI_TOKEN count from env so token assignment stays accurate
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(INPUT_DIR), ".env"))
-except Exception:
-    pass
+# Read GEMINI_TOKEN count from env (.env already loaded above)
 n_tokens = sum(1 for k in os.environ if k.startswith("GEMINI_TOKEN"))
 if n_tokens == 0:
     n_tokens = 3  # fallback
@@ -81,4 +99,17 @@ for t in range(1, n_tokens + 1):
     to = sum(r[2] for r in tr)
     tp = to / ti * 100 if ti else 0
     print(f"Token {t}: {to:>7,} / {ti:,}  ({tp:.1f}%)")
+print(f"{'='*72}")
+
+merged = os.path.join(OUTPUT_DIR, "merged_output.csv")
+log    = os.path.join(OUTPUT_DIR, "processing.log")
+if os.path.exists(merged):
+    m_rows = row_count(merged)
+    print(f"  merged_output.csv : {m_rows:,} rows  ← final merged file for this split")
+else:
+    print(f"  merged_output.csv : not yet created (appears after all workers finish)")
+if os.path.exists(log):
+    print(f"  processing.log    : exists  ← tail it for real-time worker logs")
+else:
+    print(f"  processing.log    : not yet created (appears when processor starts)")
 print(f"{'='*72}\n")

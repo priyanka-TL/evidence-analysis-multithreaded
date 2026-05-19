@@ -2,9 +2,14 @@ import os
 import pandas as pd
 from pathlib import Path
 
+# Resolve paths relative to project root (one level above this script)
+_SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
+
 # ==== CONFIG ====
-INPUT_DIR = "/Users/user/Documents/AI/parallel-process/output/MAIN-SPLITS"  # Folder containing CSV files to merge
-OUTPUT_FILE = "merged_output.csv"  # Name of the merged output file
+INPUT_DIR   = os.environ.get("MERGE_INPUT_DIR",
+                  os.path.join(_PROJECT_ROOT, "parallel_output_split_1_files"))
+OUTPUT_FILE = os.environ.get("MERGE_OUTPUT_FILE", "merged_output.csv")
 SORT_FILES = True  # Set to True to sort files before merging (useful for numbered files)
 
 # ==== DUPLICATE HANDLING ====

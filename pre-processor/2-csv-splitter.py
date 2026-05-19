@@ -1,5 +1,6 @@
 import csv
 import os
+import re
 from math import ceil
 from dotenv import load_dotenv
 
@@ -10,8 +11,11 @@ _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
 # Configuration
-INPUT_CSV  = os.path.join(_PROJECT_ROOT, "output-pre-processor", "preprocessed_data.csv")
-OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "parallel_input_split_1_files")
+# SPLITTER_INPUT_CSV and SPLITTER_OUTPUT_DIR are set by run-split-pipeline.py when running
+# in multi-split mode. Running this script directly with no env vars is identical to before.
+_default_input = os.path.join(_PROJECT_ROOT, "output-pre-processor", "preprocessed_data.csv")
+INPUT_CSV  = os.environ.get("SPLITTER_INPUT_CSV",  _default_input)
+OUTPUT_DIR = os.path.join(_PROJECT_ROOT, os.environ.get("SPLITTER_OUTPUT_DIR", "parallel_input_split_1_files"))
 PARTS = int(os.getenv("PARTS", "80"))
 
 # Create output directory if it doesn't exist

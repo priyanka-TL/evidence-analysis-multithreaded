@@ -18,8 +18,8 @@ FILTER_CSV   = os.path.join(_PROJECT_ROOT, "school_list.csv")   # optional — s
 OUTPUT_DIR   = os.path.join(_PROJECT_ROOT, "output-pre-processor")
 
 # === SPLIT CONFIGURATION ===
-SPLIT_FILES = "no"    # Set to "yes" to split into multiple files, "no" for single file
-ROWS_PER_FILE = int(os.getenv("ROWS_PER_FILE", "300000"))  # Only used if SPLIT_FILES = "yes"
+SPLIT_FILES   = os.getenv("SPLIT_FILES",   "no")            # "yes" or "no" — configurable via .env
+ROWS_PER_FILE = int(os.getenv("ROWS_PER_FILE", "300000"))   # Only used if SPLIT_FILES = "yes"
 
 # === IMAGE FORMATS ===
 IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}

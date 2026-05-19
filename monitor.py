@@ -5,7 +5,11 @@ Refreshes every 30 seconds.
 File counts run in a background thread (can take ~60s for 280 files) so the
 display never freezes. Log-based throughput updates every refresh cycle.
 
-Usage:  python3 monitor.py
+Usage (Mode A / default):
+  python monitor.py
+
+Usage (Mode B — monitor a specific split):
+  INPUT_DIR=parallel_input_split_2_files  OUTPUT_DIR=parallel_output_split_2_files  python monitor.py
 """
 import os
 import re
@@ -13,12 +17,22 @@ import time
 import csv
 import threading
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
 csv.field_size_limit(10_000_000)
 
-INPUT_DIR  = "parallel_input_split_1_files"
-OUTPUT_DIR = "parallel_output_split_1_files"
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
+
+INPUT_DIR  = os.environ.get("INPUT_DIR",  "parallel_input_split_1_files")
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "parallel_output_split_1_files")
 LOG        = os.path.join(OUTPUT_DIR, "processing.log")
+
+if not os.path.isdir(INPUT_DIR):
+    print(f"ERROR: Input directory not found: {INPUT_DIR}")
+    print("  Run the csv-splitter first:  python pre-processor/2-csv-splitter.py")
+    print("  Or run the orchestrator:     python run-split-pipeline.py")
+    exit(1)
 REFRESH    = 30          # display refresh interval (seconds)
 COUNT_INTERVAL = 120     # how often to recount all files (seconds)
 
